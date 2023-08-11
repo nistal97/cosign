@@ -34,6 +34,7 @@ import (
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/rekor"
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/sign"
 	"github.com/sigstore/cosign/v2/internal/pkg/cosign/tsa"
+	"github.com/sigstore/cosign/v2/internal/pkg/cosign/tsa/client"
 	"github.com/sigstore/cosign/v2/pkg/cosign"
 	"github.com/sigstore/cosign/v2/pkg/cosign/attestation"
 	cbundle "github.com/sigstore/cosign/v2/pkg/cosign/bundle"
@@ -42,7 +43,6 @@ import (
 	"github.com/sigstore/sigstore/pkg/signature"
 	"github.com/sigstore/sigstore/pkg/signature/dsse"
 	signatureoptions "github.com/sigstore/sigstore/pkg/signature/options"
-	tsaclient "github.com/sigstore/timestamp-authority/pkg/client"
 )
 
 // nolint
@@ -69,6 +69,10 @@ func (c *AttestBlobCommand) Exec(ctx context.Context, artifactPath string) error
 	// We can't have both a key and a security key
 	if options.NOf(c.KeyRef, c.Sk) > 1 {
 		return &options.KeyParseError{}
+	}
+
+	if c.PredicatePath == "" {
+		return fmt.Errorf("predicate cannot be empty")
 	}
 
 	if c.Timeout != 0 {
@@ -107,10 +111,9 @@ func (c *AttestBlobCommand) Exec(ctx context.Context, artifactPath string) error
 		hexDigest = c.ArtifactHash
 	}
 
-	fmt.Fprintln(os.Stderr, "Using predicate from:", c.PredicatePath)
-	predicate, err := os.Open(c.PredicatePath)
+	predicate, err := predicateReader(c.PredicatePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("getting predicate reader: %w", err)
 	}
 	defer predicate.Close()
 
@@ -145,11 +148,7 @@ func (c *AttestBlobCommand) Exec(ctx context.Context, artifactPath string) error
 
 	var rfc3161Timestamp *cbundle.RFC3161Timestamp
 	if c.TSAServerURL != "" {
-		clientTSA, err := tsaclient.GetTimestampClient(c.TSAServerURL)
-		if err != nil {
-			return fmt.Errorf("failed to create TSA client: %w", err)
-		}
-		respBytes, err := tsa.GetTimestampedSignature(sig, clientTSA)
+		respBytes, err := tsa.GetTimestampedSignature(sig, client.NewTSAClient(c.TSAServerURL))
 		if err != nil {
 			return err
 		}

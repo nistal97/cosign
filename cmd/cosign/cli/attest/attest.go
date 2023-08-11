@@ -21,7 +21,6 @@ import (
 	_ "crypto/sha256" // for `crypto.SHA256`
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"time"
 
@@ -32,6 +31,8 @@ import (
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/rekor"
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/sign"
 	"github.com/sigstore/cosign/v2/internal/pkg/cosign/tsa"
+	tsaclient "github.com/sigstore/cosign/v2/internal/pkg/cosign/tsa/client"
+	"github.com/sigstore/cosign/v2/internal/ui"
 	"github.com/sigstore/cosign/v2/pkg/cosign"
 	"github.com/sigstore/cosign/v2/pkg/cosign/attestation"
 	cbundle "github.com/sigstore/cosign/v2/pkg/cosign/bundle"
@@ -44,7 +45,6 @@ import (
 	"github.com/sigstore/rekor/pkg/generated/models"
 	"github.com/sigstore/sigstore/pkg/signature/dsse"
 	signatureoptions "github.com/sigstore/sigstore/pkg/signature/options"
-	tsaclient "github.com/sigstore/timestamp-authority/pkg/client"
 )
 
 type tlogUploadFn func(*client.Rekor, []byte) (*models.LogEntryAnon, error)
@@ -89,6 +89,10 @@ func (c *AttestCommand) Exec(ctx context.Context, imageRef string) error {
 		return &options.KeyParseError{}
 	}
 
+	if c.PredicatePath == "" {
+		return fmt.Errorf("predicate cannot be empty")
+	}
+
 	predicateURI, err := options.ParsePredicateType(c.PredicateType)
 	if err != nil {
 		return err
@@ -96,6 +100,10 @@ func (c *AttestCommand) Exec(ctx context.Context, imageRef string) error {
 	ref, err := name.ParseReference(imageRef, c.NameOptions()...)
 	if err != nil {
 		return fmt.Errorf("parsing reference: %w", err)
+	}
+	if _, ok := ref.(name.Digest); !ok {
+		msg := fmt.Sprintf(ui.TagReferenceMessage, imageRef)
+		ui.Warnf(ctx, msg)
 	}
 
 	if c.Timeout != 0 {
@@ -126,18 +134,11 @@ func (c *AttestCommand) Exec(ctx context.Context, imageRef string) error {
 	wrapped := dsse.WrapSigner(sv, types.IntotoPayloadType)
 	dd := cremote.NewDupeDetector(sv)
 
-	var predicate io.ReadCloser
-	if c.PredicatePath == "-" {
-		fmt.Fprintln(os.Stderr, "Using payload from: standard input")
-		predicate = os.Stdin
-	} else {
-		fmt.Fprintln(os.Stderr, "Using payload from:", c.PredicatePath)
-		predicate, err = os.Open(c.PredicatePath)
-		if err != nil {
-			return err
-		}
-		defer predicate.Close()
+	predicate, err := predicateReader(c.PredicatePath)
+	if err != nil {
+		return fmt.Errorf("getting predicate reader: %w", err)
 	}
+	defer predicate.Close()
 
 	sh, err := attestation.GenerateStatement(attestation.GenerateOpts{
 		Predicate: predicate,
@@ -168,13 +169,8 @@ func (c *AttestCommand) Exec(ctx context.Context, imageRef string) error {
 		opts = append(opts, static.WithCertChain(sv.Cert, sv.Chain))
 	}
 	if c.KeyOpts.TSAServerURL != "" {
-		clientTSA, err := tsaclient.GetTimestampClient(c.KeyOpts.TSAServerURL)
-		if err != nil {
-			return fmt.Errorf("failed to create TSA client: %w", err)
-		}
-
 		// Here we get the response from the timestamped authority server
-		responseBytes, err := tsa.GetTimestampedSignature(signedPayload, clientTSA)
+		responseBytes, err := tsa.GetTimestampedSignature(signedPayload, tsaclient.NewTSAClient(c.KeyOpts.TSAServerURL))
 		if err != nil {
 			return err
 		}
@@ -182,6 +178,18 @@ func (c *AttestCommand) Exec(ctx context.Context, imageRef string) error {
 
 		opts = append(opts, static.WithRFC3161Timestamp(bundle))
 	}
+
+	predicateType, err := options.ParsePredicateType(c.PredicateType)
+	if err != nil {
+		return err
+	}
+
+	predicateTypeAnnotation := map[string]string{
+		"predicateType": predicateType,
+	}
+	// Add predicateType as manifest annotation
+	opts = append(opts, static.WithAnnotations(predicateTypeAnnotation))
+
 	// Check whether we should be uploading to the transparency log
 	shouldUpload, err := sign.ShouldUploadToTlog(ctx, c.KeyOpts, digest, c.TlogUpload)
 	if err != nil {
@@ -202,10 +210,9 @@ func (c *AttestCommand) Exec(ctx context.Context, imageRef string) error {
 		return err
 	}
 
-	se, err := ociremote.SignedEntity(digest, ociremoteOpts...)
-	if err != nil {
-		return err
-	}
+	// We don't actually need to access the remote entity to attach things to it
+	// so we use a placeholder here.
+	se := ociremote.SignedUnknown(digest)
 
 	signOpts := []mutate.SignOption{
 		mutate.WithDupeDetector(dd),

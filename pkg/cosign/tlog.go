@@ -35,12 +35,15 @@ import (
 	"github.com/transparency-dev/merkle/proof"
 	"github.com/transparency-dev/merkle/rfc6962"
 
+	"github.com/sigstore/cosign/v2/internal/ui"
 	"github.com/sigstore/cosign/v2/pkg/cosign/bundle"
 	"github.com/sigstore/cosign/v2/pkg/cosign/env"
 	"github.com/sigstore/rekor/pkg/generated/client"
 	"github.com/sigstore/rekor/pkg/generated/client/entries"
 	"github.com/sigstore/rekor/pkg/generated/models"
 	"github.com/sigstore/rekor/pkg/types"
+	"github.com/sigstore/rekor/pkg/types/dsse"
+	dsse_v001 "github.com/sigstore/rekor/pkg/types/dsse/v0.0.1"
 	hashedrekord_v001 "github.com/sigstore/rekor/pkg/types/hashedrekord/v0.0.1"
 	"github.com/sigstore/rekor/pkg/types/intoto"
 	intoto_v001 "github.com/sigstore/rekor/pkg/types/intoto/v0.0.1"
@@ -79,6 +82,21 @@ func GetTransparencyLogID(pub crypto.PublicKey) (string, error) {
 	}
 	digest := sha256.Sum256(pubBytes)
 	return hex.EncodeToString(digest[:]), nil
+}
+
+func dsseEntry(ctx context.Context, signature, pubKey []byte) (models.ProposedEntry, error) {
+	var pubKeyBytes [][]byte
+
+	if len(pubKey) == 0 {
+		return nil, errors.New("public key provided has 0 length")
+	}
+
+	pubKeyBytes = append(pubKeyBytes, pubKey)
+
+	return types.NewProposedEntry(ctx, dsse.KIND, dsse_v001.APIVERSION, types.ArtifactProperties{
+		ArtifactBytes:  signature,
+		PublicKeyBytes: pubKeyBytes,
+	})
 }
 
 func intotoEntry(ctx context.Context, signature, pubKey []byte) (models.ProposedEntry, error) {
@@ -161,7 +179,17 @@ func TLogUpload(ctx context.Context, rekorClient *client.Rekor, signature []byte
 	return doUpload(ctx, rekorClient, &returnVal)
 }
 
-// TLogUploadInTotoAttestation will upload and in-toto entry for the signature and public key to the transparency log.
+// TLogUploadDSSEEnvelope will upload a DSSE entry for the signature and public key to the Rekor transparency log.
+func TLogUploadDSSEEnvelope(ctx context.Context, rekorClient *client.Rekor, signature, pemBytes []byte) (*models.LogEntryAnon, error) {
+	e, err := dsseEntry(ctx, signature, pemBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	return doUpload(ctx, rekorClient, e)
+}
+
+// TLogUploadInTotoAttestation will upload an in-toto entry for the signature and public key to the transparency log.
 func TLogUploadInTotoAttestation(ctx context.Context, rekorClient *client.Rekor, signature, pemBytes []byte) (*models.LogEntryAnon, error) {
 	e, err := intotoEntry(ctx, signature, pemBytes)
 	if err != nil {
@@ -180,7 +208,7 @@ func doUpload(ctx context.Context, rekorClient *client.Rekor, pe models.Proposed
 		// Here, we display the proof and succeed.
 		var existsErr *entries.CreateLogEntryConflict
 		if errors.As(err, &existsErr) {
-			fmt.Println("Signature already exists. Displaying proof")
+			ui.Infof(ctx, "Signature already exists. Displaying proof")
 			uriSplit := strings.Split(existsErr.Location.String(), "/")
 			uuid := uriSplit[len(uriSplit)-1]
 			e, err := GetTlogEntry(ctx, rekorClient, uuid)
@@ -191,7 +219,7 @@ func doUpload(ctx context.Context, rekorClient *client.Rekor, pe models.Proposed
 			if err != nil {
 				return nil, err
 			}
-			return e, VerifyTLogEntryOffline(e, rekorPubsFromAPI)
+			return e, VerifyTLogEntryOffline(ctx, e, rekorPubsFromAPI)
 		}
 		return nil, err
 	}
@@ -409,7 +437,7 @@ func FindTlogEntry(ctx context.Context, rekorClient *client.Rekor,
 
 // VerifyTLogEntryOffline verifies a TLog entry against a map of trusted rekorPubKeys indexed
 // by log id.
-func VerifyTLogEntryOffline(e *models.LogEntryAnon, rekorPubKeys *TrustedTransparencyLogPubKeys) error {
+func VerifyTLogEntryOffline(ctx context.Context, e *models.LogEntryAnon, rekorPubKeys *TrustedTransparencyLogPubKeys) error {
 	if e.Verification == nil || e.Verification.InclusionProof == nil {
 		return errors.New("inclusion proof not provided")
 	}
@@ -460,7 +488,7 @@ func VerifyTLogEntryOffline(e *models.LogEntryAnon, rekorPubKeys *TrustedTranspa
 		return fmt.Errorf("verifying signedEntryTimestamp: %w", err)
 	}
 	if pubKey.Status != tuf.Active {
-		fmt.Fprintf(os.Stderr, "**Info** Successfully verified Rekor entry using an expired verification key\n")
+		ui.Infof(ctx, "Successfully verified Rekor entry using an expired verification key")
 	}
 	return nil
 }

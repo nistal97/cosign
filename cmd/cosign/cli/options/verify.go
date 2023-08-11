@@ -17,12 +17,15 @@ package options
 
 import (
 	"github.com/spf13/cobra"
+
+	"github.com/sigstore/cosign/v2/internal/pkg/cosign"
 )
 
 type CommonVerifyOptions struct {
 	Offline          bool // Force offline verification
 	TSACertChainPath string
-	SkipTlogVerify   bool
+	IgnoreTlog       bool
+	MaxWorkers       int
 }
 
 func (o *CommonVerifyOptions) AddFlags(cmd *cobra.Command) {
@@ -33,9 +36,12 @@ func (o *CommonVerifyOptions) AddFlags(cmd *cobra.Command) {
 		"path to PEM-encoded certificate chain file for the RFC3161 timestamp authority. Must contain the root CA certificate. "+
 			"Optionally may contain intermediate CA certificates, and may contain the leaf TSA certificate if not present in the timestamp")
 
-	cmd.Flags().BoolVar(&o.SkipTlogVerify, "insecure-skip-tlog-verify", false,
-		"skip transparency log verification, to be used when an artifact signature has not been uploaded to the transparency log. Artifacts "+
+	cmd.Flags().BoolVar(&o.IgnoreTlog, "insecure-ignore-tlog", false,
+		"ignore transparency log verification, to be used when an artifact signature has not been uploaded to the transparency log. Artifacts "+
 			"cannot be publicly verified when not included in a log")
+
+	cmd.Flags().IntVar(&o.MaxWorkers, "max-workers", cosign.DefaultMaxWorkers,
+		"the amount of maximum workers for parallel executions")
 }
 
 // VerifyOptions is the top level wrapper for the `verify` command.
@@ -45,6 +51,7 @@ type VerifyOptions struct {
 	Attachment   string
 	Output       string
 	SignatureRef string
+	PayloadRef   string
 	LocalImage   bool
 
 	CommonVerifyOptions CommonVerifyOptions
@@ -84,6 +91,9 @@ func (o *VerifyOptions) AddFlags(cmd *cobra.Command) {
 
 	cmd.Flags().StringVar(&o.SignatureRef, "signature", "",
 		"signature content or path or remote URL")
+
+	cmd.Flags().StringVar(&o.PayloadRef, "payload", "",
+		"payload path or remote URL")
 
 	cmd.Flags().BoolVar(&o.LocalImage, "local-image", false,
 		"whether the specified image is a path to an image saved locally via 'cosign save'")
@@ -221,7 +231,7 @@ func (o *VerifyBlobAttestationOptions) AddFlags(cmd *cobra.Command) {
 		"path to bundle FILE")
 
 	cmd.Flags().BoolVar(&o.CheckClaims, "check-claims", true,
-		"whether to check the claims found")
+		"if true, verifies the provided blob's sha256 digest exists as an in-toto subject within the attestation. If false, only the DSSE envelope is verified.")
 
 	cmd.Flags().StringVar(&o.RFC3161TimestampPath, "rfc3161-timestamp", "",
 		"path to RFC3161 timestamp FILE")

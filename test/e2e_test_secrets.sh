@@ -17,10 +17,8 @@
 set -ex
 
 go build -o cosign ./cmd/cosign
-go build -o sget ./cmd/sget
 tmp=$(mktemp -d -t cosign-e2e-secrets.XXXX)
 cp cosign $tmp/
-cp sget $tmp/
 
 pushd $tmp
 
@@ -38,6 +36,7 @@ signing_key=cosign.key
 verification_key=cosign.pub
 img="${TEST_INSTANCE_REPO}/test"
 img2="${TEST_INSTANCE_REPO}/test-2"
+img3="${TEST_INSTANCE_REPO}/test-3"
 legacy_img="${TEST_INSTANCE_REPO}/legacy-test"
 for image in $img $img2 $legacy_img
 do
@@ -53,7 +52,7 @@ crane cp ghcr.io/distroless/alpine-base $multiarch_img
 # `initialize`
 ./cosign initialize
 
-## Generate (also test output redirection
+## Generate (also test output redirection)
 ./cosign generate $img > payload1
 ./cosign generate --output-file=payload2 $img
 diff payload1 payload2
@@ -74,6 +73,21 @@ do
     # verify sigs on discrete images
     ./cosign verify --key ${verification_key} "${multiarch_img}@$(crane digest --platform=$arch ${multiarch_img})"
 done
+
+# sign/attest an image that doesn't exist (yet) in the registry
+# This digest was generated with the following command and
+# does not exist anywhere AFAIK:
+#   head -10 /dev/urandom | sha256sum | cut -d' ' -f 1
+# We don't just run this here because the macos leg doesn't
+# have sha256sum
+./cosign sign --key ${signing_key} "$img3@sha256:17b14220441083f55dfa21e1deb3720457d3c2d571219801d629b43c53b99627"
+PREDICATE_FILE=$(mktemp)
+cat > "${PREDICATE_FILE}" <<EOF
+{
+  "foo": "bar"
+}
+EOF
+./cosign attest --key ${signing_key} --type custom --predicate "${PREDICATE_FILE}" "$img3@sha256:17b14220441083f55dfa21e1deb3720457d3c2d571219801d629b43c53b99627"
 
 ## confirm use of OCI media type in signature image
 crane manifest $(./cosign triangulate $img) | grep -q "application/vnd.oci.image.config.v1+json"
@@ -130,7 +144,7 @@ tail -n 1 sigs > cdr.sig
 ./cosign verify-blob --key ${verification_key} --signature car.sig myblob
 ./cosign verify-blob --key ${verification_key} --signature cdr.sig myblob2
 
-## upload blob/sget
+## upload blob
 blobimg="${TEST_INSTANCE_REPO}/blob"
 crane ls ${blobimg} | while read tag ; do crane delete "${blobimg}:${tag}" ; done
 
@@ -142,23 +156,6 @@ dgst=$(./cosign upload blob -f randomblob ${blobimg})
 ./cosign sign --key ${signing_key} ${dgst}
 ./cosign verify --key ${verification_key} ${dgst} # For sanity
 
-# sget w/ signature verification should work via tag or digest
-./sget --key ${verification_key} -o verified_randomblob_from_digest $dgst
-./sget --key ${verification_key} -o verified_randomblob_from_tag $blobimg
-
-# sget w/o signature verification should only work for ref by digest
-./sget --key ${verification_key} -o randomblob_from_digest $dgst
-if (./sget -o randomblob_from_tag $blobimg); then false; fi
-
-# clean up a bit
-crane delete $blobimg || true
-crane delete $dgst || true
-
-# Make sure they're the same
-if ( ! cmp -s randomblob verified_randomblob_from_digest ); then false; fi
-if ( ! cmp -s randomblob verified_randomblob_from_tag ); then false; fi
-if ( ! cmp -s randomblob randomblob_from_digest ); then false; fi
-
 # clean up a bit
 crane delete $blobimg || true
 crane delete $dgst || true
@@ -167,7 +164,7 @@ crane delete $dgst || true
 cat /dev/urandom | head -n 10 | base64 > randomblob
 dgst=$(./cosign upload blob -f randomblob ${blobimg})
 ./cosign sign --key ${signing_key} --tlog-upload=false ${dgst}
-./cosign verify --key ${verification_key} --insecure-skip-tlog-verify=true ${dgst} # For sanity
+./cosign verify --key ${verification_key} --insecure-ignore-tlog=true ${dgst} # For sanity
 
 # clean up a bit
 crane delete $blobimg || true

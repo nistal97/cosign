@@ -1,3 +1,304 @@
+# v2.1.1
+
+## Bug Fixes
+* wait for the workers become available again to continue the execution (#3084)
+* fix help text when in a container (#3082)
+
+## Documentation
+* update changelog (#3080)
+* DNM: Add CHANGELOG for v2.1.0 (#3068)
+
+* Carlos Tadeu Panato Junior
+* priyawadhwa
+
+# v2.1.0
+
+**Breaking Change: The predicate is now a required flag in the attest commands, set via the --type flag.**
+
+## Enhancements
+* Verify sigs and attestations in parallel (#3066)
+* Deep inspect attestations when filtering download (#3031)
+* refactor bundle validation code, add support for DSSE rekor type (#3016)
+* Allow overriding remote options (#3049)
+* feat: adds no cert found on sig exit code (#3038)
+* Make predicate a required flag in attest commands (#3033)
+* Added support for attaching Time stamp authority Response in attach command (#3001)
+* Add `sign --sign-container-identity` CLI (#2984)
+* Feature: Allow cosign to sign digests before they are uploaded. (#2959)
+* accepts `attachment-tag-prefix` for `cosign copy` (#3014)
+* Feature: adds '--allow-insecure-registry' for cosign load (#3000)
+* download attestation: support --platform flag (#2980)
+* Cleanup: Add `Digest` to the `SignedEntity` interface. (#2960)
+* verify command: support keyless verification using only a provided certificate chain with non-fulcio roots (#2845)
+* verify: use workers to limit the paralellism when verifying images with --max-workers flag (#3069)
+
+## Bug Fixes
+* Fix pkg/cosign/errors (#3050)
+* fix: update doc to refer to github-actions oidc provider (#3040)
+* fix: prefer GitHub OIDC provider if enabled (#3044)
+* Fix --sig-only in cosign copy (#3074)
+
+## Documentation
+* Fix links to sigstore/docs in markdown files (#3064)
+* Update release readme (#2942)
+
+**Thank you to our contributors!**
+* Bob Callaway
+* Carlos Tadeu Panato Junior
+* Chok Yip Lau
+* Chris Burns
+* Dmitry Savintsev
+* Enyinna Ochulor
+* Hayden B
+* Hector Fernandez
+* Jakub Hrozek
+* Jason Hall
+* Jon Johnson
+* Luiz Carvalho
+* Matt Moore
+* Mritunjay Kumar Sharma
+* Mukuls77
+* Ramkumar Chinchani
+* Sascha Grunert
+* Yolanda Robla Mota
+* priyawadhwa
+
+# v2.0.2
+
+## Enhancements
+
+* Update sigstore/sigstore to v1.6.2 to pick up TUF CDN change (#2891)
+* feat: Make cosign copy faster (#2901)
+* remove sget (#2885)
+* Require a payload to be provided with a signature (#2785)
+
+## Bug Fixes
+
+* cmd: Change error message from KeyParseError to PubKeyParseError for verify-blob. (#2876)
+* Use `SOURCE_DATE_EPOCH` for OCI CreatedAt times (#2878)
+
+## Documentation
+
+* Remove experimental warning from Fulcio flags (#2923)
+* add missing oidc provider (#2922)
+* Add zot as a supported registry (#2920)
+* deprecates `kms_support` docs (#2900)
+* chore(docs) deprecate note for usage docs (#2906)
+* adds note of deprecation for examples.md docs (#2899)
+
+## Contributors
+
+* Carlos Tadeu Panato Junior
+* Chris Burns
+* Dmitry Savintsev
+* eiffel-fl
+* Hayden B
+* Hector Fernandez
+* Jon Johnson
+* Miloslav Trmač
+* priyawadhwa
+* Ramkumar Chinchani
+
+# v2.0.1
+
+## Enhancements
+
+* Add environment variable token provider (#2864)
+* Remove cosign policy command (#2846)
+* Allow customising 'go' executable with GOEXE var (#2841)
+* Consistent tlog warnings during verification (#2840)
+* Add riscv64 arch (#2821)
+* Default generated PEM labels to SIGSTORE (#2735)
+* Update privacy statement and confirmation (#2797)
+* Add exit codes for verify errors (#2766)
+* Add Buildkite provider (#2779)
+* verify-blob-attestation: Loosen arg requirements if --check-claims=false (#2746)
+
+## Bug Fixes
+
+* PKCS11 sessions are now opened read only (#2853)
+* Makefile: date format of log should not show signatures (#2835)
+* Add missing flags to cosign verify dockerfile/manifest (#2830)
+* Add a warning to remember how to configure a custom Gitlab host (#2816)
+* Remove tag warning message from save/copy commands (#2799)
+* Mark keyless pem files with b64 (#2671)
+
+## Contributors
+
+* Aleksandr Razumov
+* Batuhan Apaydın
+* Billy Lynch
+* Carlos Tadeu Panato Junior
+* Chris Burns
+* Derek Burdick
+* Dmitry Savintsev
+* favonia
+* Hayden B
+* Hector Fernandez
+* Ivana Atanasova
+* joe miller
+* Luiz Carvalho
+* Paolo Mainardi
+* priyawadhwa
+* Radoslav Dimitrov
+* Steve Winslow
+* Vincent Batts
+* Zack Newman
+
+# v2.0.0
+This is the official 2.0.0 release of cosign!
+There are many new features and breaking changes from version 1.x, for a full explanation please read the Cosign 2.0 [blog post](https://blog.sigstore.dev/).
+
+## Breaking Changes
+* `COSIGN_EXPERIMENTAL=1` is no longer required to have identity-based ("keyless") signing and transparency.
+* By default, artifact signatures will be uploaded to Rekor, for both key-based and identity-based signing. To not upload to Rekor, include `--tlog-upload=false`.
+  * You must also include `--insecure-ignore-tlog=true` when verifying an artifact that was not uploaded to Rekor.
+  * Examples of when you may want to skip uploading to the transparency log are if you have a private Sigstore deployment that does not use transparency or a private artifact.
+  * We strongly encourage all other use-cases to upload artifact signatures to Rekor. Transparency is a critical component of supply chain security, to allow artifact maintainers and consumers to monitor a public log for their artifacts and signing identities.
+* Verification now requires identity flags, `--certificate-identity` and `--certificate-oidc-issuer`. Like verifying a signature with a public key, it's critical to specify who you trust to generate a signature for identity-based signing. See sigstore/cosign#2056 for more discussion on this change.
+* --certificate-email has been removed. Use --certificate-identity, which supports not only email verification but also any identity specified in a certificate, including SPIFFE, GitHub Actions, or service account identities.
+* Cosign no longer supports providing a certificate that does not conform to the Fulcio certificate profile, which includes setting the SubjectAlternativeName and OIDC Issuer OID. To verify with a non-conformant certificate, extract the public key from the certificate and verify with `cosign verify --key <key.pem>`. We are actively working on more support for custom certificates for those who want to bring their existing PKI.
+* Signing OCI images by tag prints a warning and is strongly discouraged, e.g. `cosign sign container.registry.io/foo:tag`. This is considered insecure since tags are mutable. If you want to specify a particular image, you are recommended to do so by digest.
+* SCT verification, a proof of inclusion in a certificate transparency log, is now on by default for verifying Fulcio certificates. For private deployments without certificate transparency, use `--insecure-ignore-sct=true` to skip this check.
+* DSSE support in verify-blob has been removed. You can now verify attestations using verify-blob-attestation.
+* Environment variable `SIGSTORE_TRUST_REKOR_API_PUBLIC_KEY` has been removed. For private deployments, if you would like to set the Rekor public key to verify transparency log entries, use either a TUF setup or set `SIGSTORE_REKOR_PUBLIC_KEY` with the PEM of the custom Rekor public key..
+* verify-blob no longer searches for a certificate. You must provide one with either `--certificate` or `--bundle`.
+* `cosign attest --type {custom|vuln}` (and `cosign verify-attestation`) will now use the RFC 3986 compliant URIs, adding https://, so that these predicate types are compliant with the in-toto specification.
+* The CosignPredicate envelope that wraps the predicates of SPDX and CycloneDX attestations has been removed, which was a violation of the schema specified via the predicateType field (more information).
+* `--force` has been removed. To skip any prompts, use `--yes`.
+
+## Improvements
+* Blob attestation and verification is now supported with cosign attest-blob and cosign verify-blob-attestation.
+* You can now set flags via environment variables, for example instead of `--certificate-identity=email`, you can set an environment variable for `COSIGN_CERTIFICATE_IDENTITY=email`.
+* `--offline=true` removes the fallback to the Rekor log when verifying an artifact. Previously, if you did not provide a bundle (a persisted response from Rekor), Cosign would fallback to querying Rekor. You can now skip this fallback for offline environments. Note that if the bundle fails to verify, Cosign will not fallback and will fail early.
+* A Fulcio certificate can now be issued for self-managed keys by providing `--issue-certificate=true` with a key, `--key`, or security key, `--sk`. This is useful when adopting Sigstore incrementally.
+* Experimental support for trusted timestamping has been added. Timestamping leverages a third party to provide the timestamp that will be used to verify short-lived Fulcio certificates, which distributes trust. We will be writing more about this in an upcoming blog post!
+  * To use a timestamp when signing a container, use` cosign sign --timestamp-server-url=<url> <container>`, such as https://freetsa.org/tsr, and to verify, `cosign verify --timestamp-certificate-chain=<path-to-PEM-encodeded-chain> <other flags> <artifact>`.
+  * To use a timestamp when signing a blob, use `cosign sign-blob --timestamp-server-url=<url> --rfc3161-timestamp=<output-path> --bundle=<output-path> <blob>`, and to verify, `cosign verify-blob --rfc3161-timestamp=<output-path> --timestamp-certificate-chain=<path-to-PEM-encoded-chain> --bundle=<output-path> <other flags> <blob>`.
+
+For specific PRs representing enhancements, bug fixes, documentation, and breaking changes, please see the sections below for prereleases v2.0.0-rc.0, v2.0.0-rc.1, v2.0.0-rc.2, and v2.0.0-rc.3.
+
+### Thanks to all contributors!
+
+* Anish Shah
+* Arnaud J Le Hors
+* Arthur Lutz
+* Batuhan Apaydın
+* Bob Callaway
+* Carlos Tadeu Panato Junior
+* Chris Burns
+* Christian Loos
+* Emmanuel T Odeke
+* Hayden B
+* Hector Fernandez
+* Huang Huang
+* Jan Wozniak
+* Josh Dolitsky
+* Josh Wolf
+* Kenny Leung
+* Marko Mudrinić
+* Matt Moore
+* Matthias Glastra
+* Miloslav Trmač
+* Mukuls77
+* Priya Wadhwa
+* Puerco
+* Stefan Zhelyazkov
+* Tim Seagren
+* Tom Meadows
+* Ville Aikas
+* Zack Newman
+* asraa
+* kpk47
+* priyawadhwa
+
+
+# v2.0.0-rc.3
+_Note: this is a prerelease for Cosign 2.0! Feel free to try it out, but know there are many breaking changes from 1.0 and the prereleases may continue to change._
+
+## Enhancements
+* Support non-Sigstore TSA requests (#2708)
+* Add COSIGN_OCI_EXPERIMENTAL, push .sig/.sbom using OCI 1.1+ digest tag (#2684)
+* Output certificate in bundle when entry is not uploaded to Rekor (#2715)
+* attach signature and attach sbom must use STDIN to upload raw string (#2637)
+
+## Bug Fixes
+* Fix: Add missing schemes to cosign predicate types. (#2717)
+* Fix: Drop the `CosignPredicate` wrapper around SBOM attestations. (#2718)
+
+## Documentation
+* Adds deprecation note for keyless docs (#2716)
+
+
+# v2.0.0-rc.2
+_Note: this is a prerelease for Cosign 2.0! Feel free to try it out, but know there are many breaking changes from 1.0 and the prereleases may continue to change._
+
+## Enhancements
+* add generate-key-pair GitHub Enterprise server support (#2676)
+* add in format string for warning (#2699)
+* Support for fetching Fulcio certs with self-managed key (#2532)
+* 2476 predicate type download (#2484)
+* Upgrade to go1.20 (#2689)
+
+## Bug Fixes
+* Fix prompts with Windows line endings (#2674)
+
+## Documentation
+
+* docs(README): verify example failing on latest (#2694)
+
+## Contributors
+* Anish Shah
+* Arthur Lutz
+* Carlos Tadeu Panato Junior
+* Christian Loos
+* Tim Seagren
+* Zack Newman
+* priyawadhwa
+
+# v2.0.0-rc.1
+_Note: this is a prerelease for Cosign 2.0! Feel free to try it out, but know there are many breaking changes from 1.0 and the prereleases may continue to change._
+
+Critical breaking changes include:
+* Certificate issuer and subject are now required on `cosign verify`
+
+## Breaking Changes
+* insecure-skip-tlog-verify: rename and adapt the cert expiration check (#2620)
+* Deprecate --certificate-email flag. Make --certificate-identity and -… (#2411)
+
+## Enhancements
+* Add warning to use digest instead of tags to other cosign commands (#2650)
+* Fix up UI messages (#2629)
+* Remove hardcoded Fulcio from output (#2621)
+* Fix missing privacy statement, print in multiple locations (#2622)
+* feat: allows custom key names for import-key-pair (#2587)
+* feat: support keyless verification for verify-blob-attestation (#2525)
+* attest-blob: add functionality for keyless signing (#2515)
+* Rego: add support for custom error/warning messages when evaluating rego rules (#2577)
+* feat: add debug information to cert validation error (#2579)
+
+## Bug Fixes
+* fix: panic with unsigned local image (#2656)
+* Make sure a cert passed in via --cert matches the bundle cert (#2652)
+* fix: fix github oidc post submit test (#2594)
+* fix: add enhanced error messages for failing verification with TUF targets (#2589)
+
+## Contributors
+* Carlos Tadeu Panato Junior
+* Chris Burns
+* Hayden B
+* Hector Fernandez
+* Huang Huang
+* Kenny Leung
+* Priya Wadhwa
+* Stefan Zhelyazkov
+* Ville Aikas
+* Zack Newman
+* asraa
+* dependabot[bot]
+* kpk47
+* priyawadhwa
+
 # v2.0.0-rc.0
 
 _Note: this is a prerelease for Cosign 2.0! Feel free to try it out, but know there are many breaking changes from 1.0 and the prereleases may continue to change._
@@ -122,7 +423,7 @@ Critical breaking changes include:
 # v1.12.1
 
 > # Highlights
-> * Pulls Fulcio root and intermediate when `--certificate-chain` is not passed into `verify-blob`. The v1.12.0 release introduced a regression: when `COSIGN_EXPERIMENTAL` was not set, cosign `verify-blob` would check a` --certificate` (without a `--certificate-chain` provided) against the operating system root CA bundle. In this release, Cosign checks the certificate against Fulcio's CA root instead (restoring the earlier behavior).
+> * Pulls Fulcio root and intermediate when `--certificate-chain` is not passed into `verify-blob`. The v1.12.0 release introduced a regression: when `COSIGN_EXPERIMENTAL` was not set, cosign `verify-blob` would check a `--certificate` (without a `--certificate-chain` provided) against the operating system root CA bundle. In this release, Cosign checks the certificate against Fulcio's CA root instead (restoring the earlier behavior).
 
 ## Bug Fixes
 

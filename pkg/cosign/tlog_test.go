@@ -38,7 +38,7 @@ var (
 func TestGetRekorPubKeys(t *testing.T) {
 	keys, err := GetRekorPubs(context.Background())
 	if err != nil {
-		t.Errorf("Unexpected error calling GetRekorPubs, expected nil: %v", err)
+		t.Fatalf("Unexpected error calling GetRekorPubs, expected nil: %v", err)
 	}
 	if len(keys.Keys) == 0 {
 		t.Errorf("expected 1 or more keys, got 0")
@@ -183,7 +183,7 @@ func TestVerifyTLogEntryOfflineFailsWithInvalidPublicKey(t *testing.T) {
 		t.Fatalf("failed to add RSA key to transparency log public keys: %v", err)
 	}
 
-	err = VerifyTLogEntryOffline(&models.LogEntryAnon{Verification: &models.LogEntryAnonVerification{InclusionProof: &models.InclusionProof{}}}, &rekorPubKeys)
+	err = VerifyTLogEntryOffline(context.Background(), &models.LogEntryAnon{Verification: &models.LogEntryAnonVerification{InclusionProof: &models.InclusionProof{}}}, &rekorPubKeys)
 	if err == nil {
 		t.Fatal("Wanted error got none")
 	}

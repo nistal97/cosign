@@ -33,9 +33,16 @@ type KeyOpts struct {
 	OIDCProvider         string // Specify which OIDC credential provider to use for keyless signer
 	BundlePath           string
 	SkipConfirmation     bool
+	TSAClientCACert      string
+	TSAClientCert        string
+	TSAClientKey         string
+	TSAServerName        string // expected SAN field in the TSA server's certificate - https://pkg.go.dev/crypto/tls#Config.ServerName
 	TSAServerURL         string
 	RFC3161TimestampPath string
 	TSACertChainPath     string
+	// IssueCertificate controls whether to issue a certificate when a key is
+	// provided.
+	IssueCertificateForExistingKey bool
 
 	// FulcioAuthFlow is the auth flow to use when authenticating against
 	// Fulcio. See https://pkg.go.dev/github.com/sigstore/cosign/v2/cmd/cosign/cli/fulcio#pkg-constants

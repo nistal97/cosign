@@ -31,6 +31,7 @@ import (
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/rekor"
 	"github.com/sigstore/cosign/v2/internal/pkg/cosign/tsa"
+	"github.com/sigstore/cosign/v2/internal/ui"
 	"github.com/sigstore/cosign/v2/pkg/blob"
 	"github.com/sigstore/cosign/v2/pkg/cosign"
 	"github.com/sigstore/cosign/v2/pkg/cosign/bundle"
@@ -62,7 +63,7 @@ type VerifyBlobCmd struct {
 	IgnoreSCT                    bool
 	SCTRef                       string
 	Offline                      bool
-	SkipTlogVerify               bool
+	IgnoreTlog                   bool
 }
 
 // nolint
@@ -77,7 +78,7 @@ func (c *VerifyBlobCmd) Exec(ctx context.Context, blobRef string) error {
 
 	// Key, sk, and cert are mutually exclusive.
 	if options.NOf(c.KeyRef, c.Sk, c.CertRef) > 1 {
-		return &options.KeyParseError{}
+		return &options.PubKeyParseError{}
 	}
 
 	var identities []cosign.Identity
@@ -108,7 +109,7 @@ func (c *VerifyBlobCmd) Exec(ctx context.Context, blobRef string) error {
 		IgnoreSCT:                    c.IgnoreSCT,
 		Identities:                   identities,
 		Offline:                      c.Offline,
-		SkipTlogVerify:               c.SkipTlogVerify,
+		IgnoreTlog:                   c.IgnoreTlog,
 	}
 	if c.RFC3161TimestampPath != "" && c.KeyOpts.TSACertChainPath == "" {
 		return fmt.Errorf("timestamp-certificate-chain is required to validate a RFC3161 timestamp")
@@ -138,7 +139,7 @@ func (c *VerifyBlobCmd) Exec(ctx context.Context, blobRef string) error {
 		co.TSARootCertificates = roots
 	}
 
-	if !c.SkipTlogVerify {
+	if !c.IgnoreTlog {
 		if c.RekorURL != "" {
 			rekorClient, err := rekor.NewClient(c.RekorURL)
 			if err != nil {
@@ -214,7 +215,7 @@ func (c *VerifyBlobCmd) Exec(ctx context.Context, blobRef string) error {
 			if isb64(certBytes) {
 				certBytes, _ = base64.StdEncoding.DecodeString(b.Cert)
 			}
-			cert, err = loadCertFromPEM(certBytes)
+			bundleCert, err := loadCertFromPEM(certBytes)
 			if err != nil {
 				// check if cert is actually a public key
 				co.SigVerifier, err = sigs.LoadPublicKeyRaw(certBytes, crypto.SHA256)
@@ -222,6 +223,11 @@ func (c *VerifyBlobCmd) Exec(ctx context.Context, blobRef string) error {
 					return fmt.Errorf("loading verifier from bundle: %w", err)
 				}
 			}
+			// if a cert was passed in, make sure it matches the cert in the bundle
+			if cert != nil && !cert.Equal(bundleCert) {
+				return fmt.Errorf("the cert passed in does not match the cert in the provided bundle")
+			}
+			cert = bundleCert
 		}
 		opts = append(opts, static.WithBundle(b.Bundle))
 	}
@@ -294,7 +300,7 @@ func (c *VerifyBlobCmd) Exec(ctx context.Context, blobRef string) error {
 		return err
 	}
 
-	fmt.Fprintln(os.Stderr, "Verified OK")
+	ui.Infof(ctx, "Verified OK")
 	return nil
 }
 

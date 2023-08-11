@@ -17,7 +17,6 @@ package cli
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/google/go-containerregistry/pkg/name"
 
@@ -25,7 +24,10 @@ import (
 
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/verify"
+	"github.com/sigstore/cosign/v2/internal/ui"
 )
+
+const ignoreTLogMessage = "Skipping tlog verification is an insecure practice that lacks of transparency and auditability verification for the %s."
 
 func Verify() *cobra.Command {
 	o := &options.VerifyOptions{}
@@ -58,6 +60,10 @@ against the transparency log.`,
 
   # verify image with local certificate and certificate chain
   cosign verify --cert cosign.crt --cert-chain chain.crt <IMAGE>
+
+  # verify image using keyless verification with the given certificate
+  # chain and identity parameters, without Fulcio roots (for BYO PKI):
+  cosign verify --cert-chain chain.crt --certificate-oidc-issuer https://issuer.example.com --certificate-identity foo@example.com <IMAGE>
 
   # verify image with public key provided by URL
   cosign verify --key https://host.for/[FILE] <IMAGE>
@@ -115,21 +121,29 @@ against the transparency log.`,
 				Annotations:                  annotations,
 				HashAlgorithm:                hashAlgorithm,
 				SignatureRef:                 o.SignatureRef,
+				PayloadRef:                   o.PayloadRef,
 				LocalImage:                   o.LocalImage,
 				Offline:                      o.CommonVerifyOptions.Offline,
 				TSACertChainPath:             o.CommonVerifyOptions.TSACertChainPath,
-				SkipTlogVerify:               o.CommonVerifyOptions.SkipTlogVerify,
+				IgnoreTlog:                   o.CommonVerifyOptions.IgnoreTlog,
+				MaxWorkers:                   o.CommonVerifyOptions.MaxWorkers,
+			}
+
+			if o.CommonVerifyOptions.MaxWorkers == 0 {
+				return fmt.Errorf("please set the --max-worker flag to a value that is greater than 0")
 			}
 
 			if o.Registry.AllowInsecure {
 				v.NameOptions = append(v.NameOptions, name.Insecure)
 			}
 
-			if o.CommonVerifyOptions.SkipTlogVerify {
-				fmt.Fprintln(os.Stderr, "**Warning** Skipping tlog verification is an insecure practice that lacks of transparency and auditability verification for the signature.")
+			ctx := cmd.Context()
+
+			if o.CommonVerifyOptions.IgnoreTlog {
+				ui.Warnf(ctx, fmt.Sprintf(ignoreTLogMessage, "signature"))
 			}
 
-			return v.Exec(cmd.Context(), args)
+			return v.Exec(ctx, args)
 		},
 	}
 
@@ -210,10 +224,21 @@ against the transparency log.`,
 				NameOptions:                  o.Registry.NameOptions(),
 				Offline:                      o.CommonVerifyOptions.Offline,
 				TSACertChainPath:             o.CommonVerifyOptions.TSACertChainPath,
-				SkipTlogVerify:               o.CommonVerifyOptions.SkipTlogVerify,
+				IgnoreTlog:                   o.CommonVerifyOptions.IgnoreTlog,
+				MaxWorkers:                   o.CommonVerifyOptions.MaxWorkers,
 			}
 
-			return v.Exec(cmd.Context(), args)
+			if o.CommonVerifyOptions.MaxWorkers == 0 {
+				return fmt.Errorf("please set the --max-worker flag to a value that is greater than 0")
+			}
+
+			ctx := cmd.Context()
+
+			if o.CommonVerifyOptions.IgnoreTlog {
+				ui.Warnf(ctx, fmt.Sprintf(ignoreTLogMessage, "attestation"))
+			}
+
+			return v.Exec(ctx, args)
 		},
 	}
 
@@ -295,12 +320,16 @@ The blob may be specified as a path to a file or - for stdin.`,
 				IgnoreSCT:                    o.CertVerify.IgnoreSCT,
 				SCTRef:                       o.CertVerify.SCT,
 				Offline:                      o.CommonVerifyOptions.Offline,
-				SkipTlogVerify:               o.CommonVerifyOptions.SkipTlogVerify,
+				IgnoreTlog:                   o.CommonVerifyOptions.IgnoreTlog,
 			}
-			if err := verifyBlobCmd.Exec(cmd.Context(), args[0]); err != nil {
-				return fmt.Errorf("verifying blob %s: %w", args, err)
+
+			ctx := cmd.Context()
+
+			if o.CommonVerifyOptions.IgnoreTlog {
+				ui.Warnf(ctx, fmt.Sprintf(ignoreTLogMessage, "blob"))
 			}
-			return nil
+
+			return verifyBlobCmd.Exec(ctx, args[0])
 		},
 	}
 
@@ -326,7 +355,7 @@ The blob may be specified as a path to a file.`,
 
 `,
 
-		Args:             cobra.ExactArgs(1),
+		Args:             cobra.MaximumNArgs(1),
 		PersistentPreRun: options.BindViper,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ko := options.KeyOpts{
@@ -354,12 +383,24 @@ The blob may be specified as a path to a file.`,
 				IgnoreSCT:                    o.CertVerify.IgnoreSCT,
 				SCTRef:                       o.CertVerify.SCT,
 				Offline:                      o.CommonVerifyOptions.Offline,
-				SkipTlogVerify:               o.CommonVerifyOptions.SkipTlogVerify,
+				IgnoreTlog:                   o.CommonVerifyOptions.IgnoreTlog,
 			}
-			if len(args) != 1 {
+			// We only use the blob if we are checking claims.
+			if len(args) == 0 && o.CheckClaims {
 				return fmt.Errorf("no path to blob passed in, run `cosign verify-blob-attestation -h` for more help")
 			}
-			return v.Exec(cmd.Context(), args[0])
+			var path string
+			if len(args) > 0 {
+				path = args[0]
+			}
+
+			ctx := cmd.Context()
+
+			if o.CommonVerifyOptions.IgnoreTlog {
+				ui.Warnf(ctx, fmt.Sprintf(ignoreTLogMessage, "blob attestation"))
+			}
+
+			return v.Exec(ctx, path)
 		},
 	}
 

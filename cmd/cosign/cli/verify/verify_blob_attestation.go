@@ -61,10 +61,10 @@ type VerifyBlobAttestationCommand struct {
 	CertGithubWorkflowRepository string
 	CertGithubWorkflowRef        string
 
-	IgnoreSCT      bool
-	SCTRef         string
-	Offline        bool
-	SkipTlogVerify bool
+	IgnoreSCT  bool
+	SCTRef     string
+	Offline    bool
+	IgnoreTlog bool
 
 	CheckClaims   bool
 	PredicateType string
@@ -106,28 +106,28 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 		CertGithubWorkflowRef:        c.CertGithubWorkflowRef,
 		IgnoreSCT:                    c.IgnoreSCT,
 		Offline:                      c.Offline,
-		SkipTlogVerify:               c.SkipTlogVerify,
+		IgnoreTlog:                   c.IgnoreTlog,
 	}
+	var h v1.Hash
 	if c.CheckClaims {
+		// Get the actual digest of the blob
+		var payload internal.HashReader
+		f, err := os.Open(filepath.Clean(artifactPath))
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		payload = internal.NewHashReader(f, sha256.New())
+		if _, err := io.ReadAll(&payload); err != nil {
+			return err
+		}
+		digest := payload.Sum(nil)
+		h = v1.Hash{
+			Hex:       hex.EncodeToString(digest),
+			Algorithm: "sha256",
+		}
 		co.ClaimVerifier = cosign.IntotoSubjectClaimVerifier
-	}
-
-	// Get the actual digest of the blob
-	var payload internal.HashReader
-	f, err := os.Open(filepath.Clean(artifactPath))
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	payload = internal.NewHashReader(f, sha256.New())
-	if _, err := io.ReadAll(&payload); err != nil {
-		return err
-	}
-	digest := payload.Sum(nil)
-	h := v1.Hash{
-		Hex:       hex.EncodeToString(digest),
-		Algorithm: "sha256",
 	}
 
 	// Set up TSA, Fulcio roots and tlog public keys and clients.
@@ -159,7 +159,7 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 		co.TSARootCertificates = roots
 	}
 
-	if !c.SkipTlogVerify {
+	if !c.IgnoreTlog {
 		if c.RekorURL != "" {
 			rekorClient, err := rekor.NewClient(c.RekorURL)
 			if err != nil {
@@ -251,7 +251,7 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 			if isb64(certBytes) {
 				certBytes, _ = base64.StdEncoding.DecodeString(b.Cert)
 			}
-			cert, err = loadCertFromPEM(certBytes)
+			bundleCert, err := loadCertFromPEM(certBytes)
 			if err != nil {
 				// check if cert is actually a public key
 				co.SigVerifier, err = sigs.LoadPublicKeyRaw(certBytes, crypto.SHA256)
@@ -259,7 +259,13 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 					return fmt.Errorf("loading verifier from bundle: %w", err)
 				}
 			}
+			// if a cert was passed in, make sure it matches the cert in the bundle
+			if cert != nil && !cert.Equal(bundleCert) {
+				return fmt.Errorf("the cert passed in does not match the cert in the provided bundle")
+			}
+			cert = bundleCert
 		}
+
 		encodedSig, err = base64.StdEncoding.DecodeString(b.Base64Signature)
 		if err != nil {
 			return fmt.Errorf("decoding signature: %w", err)
@@ -334,8 +340,8 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 
 	// This checks the predicate type -- if no error is returned and no payload is, then
 	// the attestation is not of the given predicate type.
-	if b, err := policy.AttestationToPayloadJSON(ctx, c.PredicateType, signature); b == nil && err == nil {
-		return fmt.Errorf("invalid predicate type, expected %s", c.PredicateType)
+	if b, gotPredicateType, err := policy.AttestationToPayloadJSON(ctx, c.PredicateType, signature); b == nil && err == nil {
+		return fmt.Errorf("invalid predicate type, expected %s got %s", c.PredicateType, gotPredicateType)
 	}
 
 	fmt.Fprintln(os.Stderr, "Verified OK")

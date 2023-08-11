@@ -15,13 +15,11 @@ Cosign aims to make signatures **invisible infrastructure**.
 
 Cosign supports:
 
+* "Keyless signing" with the Sigstore public good Fulcio certificate authority and Rekor transparency log (default)
 * Hardware and KMS signing
+* Signing with a cosign generated encrypted private/public keypair
 * Container Signing, Verification and Storage in an OCI registry.
 * Bring-your-own PKI
-* Our free OIDC PKI ([Fulcio](https://github.com/sigstore/fulcio))
-* Built-in binary transparency and timestamping service ([Rekor](https://github.com/sigstore/rekor))
-
-![intro](images/intro.gif)
 
 ## Info
 
@@ -34,6 +32,8 @@ Click [here](https://join.slack.com/t/sigstore/shared_invite/zt-mhs55zh0-XmY3bcf
 For Homebrew, Arch, Nix, GitHub Action, and Kubernetes installs see the [installation docs](https://docs.sigstore.dev/cosign/installation).
 
 For Linux and macOS binaries see the [GitHub release assets](https://github.com/sigstore/cosign/releases/latest).
+
+:rotating_light: If you are downloading releases of cosign from our GCS bucket - please see more information on the July 31, 2023 [deprecation notice](https://blog.sigstore.dev/cosign-releases-bucket-deprecation/) :rotating_light:
 
 ## Developer Installation
 
@@ -66,38 +66,8 @@ ENTRYPOINT [ "cosign" ]
 ## Quick Start
 
 This shows how to:
-
-* generate a keypair
-* sign a container image and store that signature in the registry
-* find signatures for a container image, and verify them against a public key
-
-See the [Usage documentation](USAGE.md) for more commands!
-
-See the [FUN.md](FUN.md) documentation for some fun tips and tricks!
-
-NOTE: you will need access to a container registry for cosign to work with.
-[ttl.sh](https://ttl.sh) offers free, short-lived (ie: hours), anonymous container image
-hosting if you just want to try these commands out.
-
-For instance:
-
-```shell
-$ SRC_IMAGE=busybox
-$ SRC_DIGEST=$(crane digest busybox)
-$ IMAGE_URI=ttl.sh/$(uuidgen | head -c 8 | tr 'A-Z' 'a-z')
-$ crane cp $SRC_IMAGE@$SRC_DIGEST $IMAGE_URI:1h
-$ IMAGE_URI_DIGEST=$IMAGE_URI@$SRC_DIGEST
-```
-
-### Generate a keypair
-
-```shell
-$ cosign generate-key-pair
-Enter password for private key:
-Enter again:
-Private key written to cosign.key
-Public key written to cosign.pub
-```
+* sign a container image with the default "keyless signing" method (see [KEYLESS.md](./KEYLESS.md))
+* verify the container image
 
 ### Sign a container and store the signature in the registry
 
@@ -106,14 +76,39 @@ rather than a tag (`:latest`) because otherwise you might sign something you
 didn't intend to!
 
 ```shell
-$ cosign sign --key cosign.key $IMAGE_URI_DIGEST
-Enter password for private key:
-Pushing signature to: index.docker.io/dlorenc/demo:sha256-87ef60f558bad79beea6425a3b28989f01dd417164150ab3baab98dcbf04def8.sig
+ cosign sign $IMAGE
+
+Generating ephemeral keys...
+Retrieving signed certificate...
+
+	Note that there may be personally identifiable information associated with this signed artifact.
+	This may include the email address associated with the account with which you authenticate.
+	This information will be used for signing this artifact and will be stored in public transparency logs and cannot be removed later.
+
+By typing 'y', you attest that you grant (or have permission to grant) and agree to have this information stored permanently in transparency logs.
+Are you sure you would like to continue? [y/N] y
+Your browser will now be opened to:
+https://oauth2.sigstore.dev/auth/auth?access_type=online&client_id=sigstore&code_challenge=OrXitVKUZm2lEWHVt1oQWR4HZvn0rSlKhLcltglYxCY&code_challenge_method=S256&nonce=2KvOWeTFxYfxyzHtssvlIXmY6Jk&redirect_uri=http%3A%2F%2Flocalhost%3A57102%2Fauth%2Fcallback&response_type=code&scope=openid+email&state=2KvOWfbQJ1caqScgjwibzK2qJmb
+Successfully verified SCT...
+tlog entry created with index: 12086900
+Pushing signature to: $IMAGE
 ```
 
-The cosign command above prompts the user to enter the password for the private key.
-The user can either manually enter the password, or if the environment variable `COSIGN_PASSWORD` is set then it is used automatically.
+Cosign will prompt you to authenticate via OIDC, where you'll sign in with your email address.
+Under the hood, cosign will request a code signing certificate from the Fulcio certificate authority.
+The subject of the certificate will match the email address you logged in with.
+Cosign will then store the signature and certificate in the Rekor transparency log, and upload the signature to the OCI registry alongside the image you're signing.
 
+
+### Verify a container
+
+To verify the image, you'll need to pass in the expected certificate issuer and certificate subject via the `--certificate-identity` and `--certificate-oidc-issuer` flags:
+
+```
+cosign verify $IMAGE --certificate-identity=$IDENTITY --certificate-oidc-issuer=$OIDC_ISSUER
+```
+
+You can also pass in a regex for the certificate identity and issuer flags, `--certificate-identity-regexp` and `--certificate-oidc-issuer-regexp`.
 
 ### Verify a container against a public key
 
@@ -126,45 +121,18 @@ Note that these signed payloads include the digest of the container image, which
 sure these "detached" signatures cover the correct image.
 
 ```shell
-$ cosign verify --key cosign.pub $IMAGE_URI
+$ cosign verify --key cosign.pub $IMAGE_URI:1h
 The following checks were performed on these signatures:
   - The cosign claims were validated
   - The signatures were verified against the specified public key
 {"Critical":{"Identity":{"docker-reference":""},"Image":{"Docker-manifest-digest":"sha256:87ef60f558bad79beea6425a3b28989f01dd417164150ab3baab98dcbf04def8"},"Type":"cosign container image signature"},"Optional":null}
 ```
 
-## `Cosign` is 1.0!
-
-This means the core feature set of `cosign` is considered ready for production use.
-This core set includes:
-
-### Key Management
-
-* fixed, text-based keys generated using `cosign generate-key-pair`
-* cloud KMS-based keys generated using `cosign generate-key-pair -kms`
-* keys generated on hardware tokens using the PIV interface using `cosign piv-tool`
-* Kubernetes-secret based keys generated using `cosign generate-key-pair k8s://namespace/secretName`
-
-### Artifact Types
-
-* OCI and Docker Images
-* Other artifacts that can be stored in a container registry, including:
-  * Tekton Bundles
-  * Helm Charts
-  * WASM modules
-  * eBPF modules
-  * (probably anything else, feel free to add things to this list)
-* Text files and other binary blobs, using `cosign sign-blob`
 
 ### What ** is not ** production ready?
 
 While parts of `cosign` are stable, we are continuing to experiment and add new features.
 The following feature set is not considered stable yet, but we are committed to stabilizing it over time!
-
-#### Anything under the `COSIGN_EXPERIMENTAL` environment variable
-
-* Integration with the `Rekor` transparency log
-* Keyless signatures using the `Fulcio` CA
 
 #### Formats/Specifications
 
@@ -223,44 +191,6 @@ Pushing signature to: ttl.sh/my-artifact-f42c22e0
 ```
 
 As usual, make sure to reference any images you sign by their digest to make sure you don't sign the wrong thing!
-
-#### sget
-
-We also include the `sget` command for safer, automatic verification of signatures and integration with our binary transparency log, Rekor.
-
-To install `sget`, if you have Go 1.16+, you can directly run:
-
-    $ go install github.com/sigstore/cosign/v2/cmd/sget@latest
-
-and the resulting binary will be placed at `$GOPATH/bin/sget` (or `$GOBIN/sget`, if set).
-
-Just like `curl`, `sget` can be used to fetch artifacts by digest using the OCI URL.
-Digest verification is automatic:
-
-```shell
-$ sget us.gcr.io/dlorenc-vmtest2/readme@sha256:4aa3054270f7a70b4528f2064ee90961788e1e1518703592ae4463de3b889dec > artifact
-```
-
-You can also use `sget` to fetch contents by tag.
-Fetching contents without verifying them is dangerous, so we require the artifact be signed in this case:
-
-```shell
-$ sget gcr.io/dlorenc-vmtest2/artifact
-error: public key must be specified when fetching by tag, you must fetch by digest or supply a public key
-
-$ sget --key cosign.pub us.gcr.io/dlorenc-vmtest2/readme > foo
-
-Verification for us.gcr.io/dlorenc-vmtest2/readme --
-The following checks were performed on each of these signatures:
-  - The cosign claims were validated
-  - Existence of the claims in the transparency log was verified offline
-  - The signatures were verified against the specified public key
-  - Any certificates were verified against the Fulcio roots.
-```
-
-The signature, claims and transparency log proofs are all verified automatically by sget as part of the download.
-
-`curl | bash` isn't a great idea, but `sget | bash` is less-bad.
 
 #### Tekton Bundles
 
@@ -376,6 +306,7 @@ Today, `cosign` has been tested and works against the following registries:
 * Elastic Container Registry
 * IBM Cloud Container Registry
 * Cloudsmith Container Registry
+* The CNCF zot Registry
 
 We aim for wide registry support. To `sign` images in registries which do not yet fully support [OCI media types](https://github.com/sigstore/cosign/blob/main/SPEC.md#object-types), one may need to use `COSIGN_DOCKER_MEDIA_TYPES` to fall back to legacy equivalents. For example:
 
@@ -386,19 +317,6 @@ COSIGN_DOCKER_MEDIA_TYPES=1 cosign sign --key cosign.key legacy-registry.example
 Please help test and file bugs if you see issues!
 Instructions can be found in the [tracking issue](https://github.com/sigstore/cosign/issues/40).
 
-## Rekor Support
-_Note: this is an experimental feature_
-
-To publish signed artifacts to a Rekor transparency log and verify their existence in the log
-set the `COSIGN_EXPERIMENTAL=1` environment variable.
-
-```shell
-$ COSIGN_EXPERIMENTAL=1 cosign sign --key cosign.key $IMAGE_URI_DIGEST
-$ COSIGN_EXPERIMENTAL=1 cosign verify --key cosign.pub $IMAGE_URI
-```
-
-`cosign` defaults to using the public instance of rekor at [rekor.sigstore.dev](https://rekor.sigstore.dev).
-To configure the rekor server, use the -`rekor-url` flag
 
 ## Caveats
 
@@ -504,12 +422,12 @@ Note: different registries might expect different formats for the "repository."
 Generated private keys are stored in PEM format.
 The keys encrypted under a password using scrypt as a KDF and nacl/secretbox for encryption.
 
-They have a PEM header of `ENCRYPTED COSIGN PRIVATE KEY`:
+They have a PEM header of `ENCRYPTED SIGSTORE PRIVATE KEY`:
 
 ```shell
------BEGIN ENCRYPTED COSIGN PRIVATE KEY-----
+-----BEGIN ENCRYPTED SIGSTORE PRIVATE KEY-----
 ...
------END ENCRYPTED COSIGN PRIVATE KEY-----
+-----END ENCRYPTED SIGSTORE PRIVATE KEY-----
 ```
 
 Public keys are stored on disk in PEM-encoded standard PKIX format with a header of `PUBLIC KEY`.
@@ -578,7 +496,7 @@ The following checks were performed on each of these signatures:
   - The claims were present in the transparency log
   - The signatures were integrated into the transparency log when the certificate was valid
   - The signatures were verified against the specified public key
-  - Any certificates were verified against the Fulcio roots.
+  - The code-signing certificate was verified using trusted certificate authority certificates
 
 {"Critical":{"Identity":{"docker-reference":""},"Image":{"Docker-manifest-digest":"sha256:551e6cce7ed2e5c914998f931b277bc879e675b74843e6f29bc17f3b5f692bef"},"Type":"cosign container image signature"},"Optional":null}
 ```
@@ -828,3 +746,9 @@ We will also cut patch releases periodically as needed to address bugs.
 
 Should you discover any security issues, please refer to sigstore's [security
 process](https://github.com/sigstore/.github/blob/main/SECURITY.md)
+
+## PEM files in GitHub Release Assets
+
+The GitHub release assets for cosign contain a PEM file produced by [GoReleaser](https://github.com/sigstore/cosign/blob/ac999344eb381ae91455b0a9c5c267e747608d76/.goreleaser.yml#L166) while signing the cosign blob that is used to verify the integrity of the release binaries. This file is not used by cosign itself, but is provided for users who wish to verify the integrity of the release binaries. 
+
+By default, cosign output these PEM files in [base64 encoded format](https://github.com/sigstore/cosign/blob/main/doc/cosign_sign-blob.md#options), this approach might be good for air-gapped environments where the PEM file is stored in a file system. So, you should decode these PEM files before using them to verify the blobs.

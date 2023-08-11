@@ -43,6 +43,9 @@ func (fa *failingAttestation) Payload() ([]byte, error) {
 func (fa *failingAttestation) Annotations() (map[string]string, error) {
 	return nil, fmt.Errorf("unimplemented")
 }
+func (fa *failingAttestation) Signature() ([]byte, error) {
+	return nil, fmt.Errorf("unimplemented")
+}
 func (fa *failingAttestation) Base64Signature() (string, error) {
 	return "", fmt.Errorf("unimplemented")
 }
@@ -100,8 +103,7 @@ func TestFailures(t *testing.T) {
 		payload          string
 		predicateType    string
 		wantErrSubstring string
-	}{{payload: "", predicateType: "notvalidpredicate", wantErrSubstring: "invalid predicate type"},
-		{payload: "", wantErrSubstring: "unmarshaling payload data"}, {payload: "{badness", wantErrSubstring: "unmarshaling payload data"},
+	}{{payload: "", wantErrSubstring: "unmarshaling payload data"}, {payload: "{badness", wantErrSubstring: "unmarshaling payload data"},
 		{payload: `{"payloadType":"notmarshallable}`, wantErrSubstring: "unmarshaling payload data"},
 		{payload: `{"payload":"shou!ln'twork"}`, wantErrSubstring: "decoding payload"},
 		{payload: `{"payloadType":"finebutnopayload"}`, wantErrSubstring: "could not find payload"},
@@ -116,7 +118,7 @@ func TestFailures(t *testing.T) {
 		if predicateType == "" {
 			predicateType = "custom"
 		}
-		_, err = AttestationToPayloadJSON(context.TODO(), predicateType, att)
+		_, _, err = AttestationToPayloadJSON(context.TODO(), predicateType, att)
 		checkFailure(t, tc.wantErrSubstring, err)
 	}
 }
@@ -127,7 +129,7 @@ func TestFailures(t *testing.T) {
 // constructing different attestations there.
 func TestErroringPayload(t *testing.T) {
 	// Payload() call fails
-	_, err := AttestationToPayloadJSON(context.TODO(), "custom", &failingAttestation{})
+	_, _, err := AttestationToPayloadJSON(context.TODO(), "custom", &failingAttestation{})
 	checkFailure(t, "inducing test failure", err)
 }
 func TestAttestationToPayloadJson(t *testing.T) {
@@ -139,7 +141,7 @@ func TestAttestationToPayloadJson(t *testing.T) {
 		if err != nil {
 			t.Fatal("Failed to create static.NewSignature: ", err)
 		}
-		jsonBytes, err := AttestationToPayloadJSON(context.TODO(), fileName, ociSig)
+		jsonBytes, gotPredicateType, err := AttestationToPayloadJSON(context.TODO(), fileName, ociSig)
 		if err != nil {
 			t.Fatalf("Failed to convert : %s", err)
 		}
@@ -147,15 +149,17 @@ func TestAttestationToPayloadJson(t *testing.T) {
 		case "custom":
 			var intoto in_toto.Statement
 			if err := json.Unmarshal(jsonBytes, &intoto); err != nil {
-				t.Fatal("Wanted custom statement, can't unmarshal to it: ", err)
+				t.Fatalf("[%s] Wanted custom statement, can't unmarshal to it: %v", fileName, err)
 			}
 			checkPredicateType(t, attestation.CosignCustomProvenanceV01, intoto.PredicateType)
+			checkPredicateType(t, gotPredicateType, intoto.PredicateType)
 		case "vuln":
 			var vulnStatement attestation.CosignVulnStatement
 			if err := json.Unmarshal(jsonBytes, &vulnStatement); err != nil {
-				t.Fatal("Wanted vuln statement, can't unmarshal to it: ", err)
+				t.Fatalf("[%s] Wanted vuln statement, can't unmarshal to it: %v", fileName, err)
 			}
 			checkPredicateType(t, attestation.CosignVulnProvenanceV01, vulnStatement.PredicateType)
+			checkPredicateType(t, gotPredicateType, vulnStatement.PredicateType)
 		case "default":
 			t.Fatal("non supported predicate file")
 		}

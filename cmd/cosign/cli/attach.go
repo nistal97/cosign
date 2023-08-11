@@ -49,7 +49,7 @@ func attachSignature() *cobra.Command {
 		PersistentPreRun: options.BindViper,
 		Args:             cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return attach.SignatureCmd(cmd.Context(), o.Registry, o.Signature, o.Payload, args[0])
+			return attach.SignatureCmd(cmd.Context(), o.Registry, o.Signature, o.Payload, o.Cert, o.CertChain, o.TimeStampedSig, args[0])
 		},
 	}
 
@@ -73,7 +73,7 @@ func attachSBOM() *cobra.Command {
 				return err
 			}
 			fmt.Fprintf(os.Stderr, "WARNING: Attaching SBOMs this way does not sign them. If you want to sign them, use 'cosign attest --predicate %s --key <key path>' or 'cosign sign --key <key path> --attachment sbom <image uri>'.\n", o.SBOM)
-			return attach.SBOMCmd(cmd.Context(), o.Registry, o.SBOM, mediaType, args[0])
+			return attach.SBOMCmd(cmd.Context(), o.Registry, o.RegistryExperimental, o.SBOM, mediaType, args[0])
 		},
 	}
 
@@ -94,7 +94,7 @@ func attachAttestation() *cobra.Command {
   cosign attach attestation --attestation <attestation file path> --attestation <attestation file path> <image uri>
 
   # attach attestation from bundle files in form of JSONLines to a container image
-  # https://github.com/in-toto/attestation/blob/main/spec/bundle.md
+  # https://github.com/in-toto/attestation/blob/main/spec/v1.0-draft/bundle.md
   cosign attach attestation --attestation <attestation bundle file path> <image uri>
 `,
 

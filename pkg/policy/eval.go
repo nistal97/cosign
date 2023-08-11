@@ -18,10 +18,8 @@ package policy
 import (
 	"context"
 	"fmt"
-	"log"
 
 	"cuelang.org/go/cue/cuecontext"
-	"github.com/sigstore/cosign/v2/pkg/cosign"
 	"github.com/sigstore/cosign/v2/pkg/cosign/rego"
 )
 
@@ -37,12 +35,16 @@ func EvaluatePolicyAgainstJSON(ctx context.Context, name, policyType string, pol
 	case "cue":
 		cueValidationErr := evaluateCue(ctx, jsonBytes, policyBody)
 		if cueValidationErr != nil {
-			return nil, cosign.NewVerificationError("failed evaluating cue policy for %s: %v", name, cueValidationErr)
+			return nil, &EvaluationFailure{
+				fmt.Errorf("failed evaluating cue policy for %s: %w", name, cueValidationErr),
+			}
 		}
 	case "rego":
 		regoValidationWarn, regoValidationErr := evaluateRego(ctx, jsonBytes, policyBody)
 		if regoValidationErr != nil {
-			return regoValidationWarn, cosign.NewVerificationError("failed evaluating rego policy for type %s: %s", name, regoValidationErr)
+			return regoValidationWarn, &EvaluationFailure{
+				fmt.Errorf("failed evaluating rego policy for type %s: %w", name, regoValidationErr),
+			}
 		}
 		// It is possible to return warning messages when the policy is compliant
 		return regoValidationWarn, regoValidationErr
@@ -54,9 +56,6 @@ func EvaluatePolicyAgainstJSON(ctx context.Context, name, policyType string, pol
 
 // evaluateCue evaluates a cue policy `evaluator` against `attestation`
 func evaluateCue(_ context.Context, attestation []byte, evaluator string) error {
-	log.Printf("Evaluating attestation: %s", string(attestation))
-	log.Printf("Evaluator: %s", evaluator)
-
 	cueCtx := cuecontext.New()
 	cueEvaluator := cueCtx.CompileString(evaluator)
 	if cueEvaluator.Err() != nil {
@@ -75,8 +74,5 @@ func evaluateCue(_ context.Context, attestation []byte, evaluator string) error 
 
 // evaluateRego evaluates a rego policy `evaluator` against `attestation`
 func evaluateRego(_ context.Context, attestation []byte, evaluator string) (warnings error, errors error) {
-	log.Printf("Evaluating attestation: %s", string(attestation))
-	log.Printf("Evaluating evaluator: %s", evaluator)
-
 	return rego.ValidateJSONWithModuleInput(attestation, evaluator)
 }

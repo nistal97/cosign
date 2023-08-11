@@ -17,10 +17,8 @@
 set -ex
 
 go build -o cosign ./cmd/cosign
-go build -o sget ./cmd/sget
 tmp=$(mktemp -d -t cosign-e2e-secrets.XXXXXX)
 cp cosign $tmp/
-cp sget $tmp/
 
 cd $tmp
 
@@ -59,8 +57,8 @@ unset COSIGN_REPOSITORY
 stdin_password=${COSIGN_PASSWORD}
 unset COSIGN_PASSWORD
 (crane delete $(./cosign triangulate $img)) || true
-echo $stdin_password | ./cosign sign --key ${signing_key} --output-signature interactive.sig  $img
-COSIGN_KEY=${verification_key} COSIGN_SIGNATURE=interactive.sig ./cosign verify $img
+echo $stdin_password | ./cosign sign --key ${signing_key} --output-signature interactive.sig --output-payload interactive.payload $img
+COSIGN_KEY=${verification_key} COSIGN_SIGNATURE=interactive.sig ./cosign verify --payload interactive.payload $img
 export COSIGN_PASSWORD=${stdin_password}
 
 # What else needs auth?

@@ -22,12 +22,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/fulcio"
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/rekor"
 	"github.com/sigstore/cosign/v2/internal/pkg/cosign/tsa"
+	"github.com/sigstore/cosign/v2/internal/ui"
 	"github.com/sigstore/cosign/v2/pkg/cosign"
 	"github.com/sigstore/cosign/v2/pkg/cosign/cue"
 	"github.com/sigstore/cosign/v2/pkg/cosign/pivkey"
@@ -64,7 +66,8 @@ type VerifyAttestationCommand struct {
 	NameOptions                  []name.Option
 	Offline                      bool
 	TSACertChainPath             string
-	SkipTlogVerify               bool
+	IgnoreTlog                   bool
+	MaxWorkers                   int
 }
 
 // Exec runs the verification command
@@ -101,7 +104,8 @@ func (c *VerifyAttestationCommand) Exec(ctx context.Context, images []string) (e
 		IgnoreSCT:                    c.IgnoreSCT,
 		Identities:                   identities,
 		Offline:                      c.Offline,
-		SkipTlogVerify:               c.SkipTlogVerify,
+		IgnoreTlog:                   c.IgnoreTlog,
+		MaxWorkers:                   c.MaxWorkers,
 	}
 	if c.CheckClaims {
 		co.ClaimVerifier = cosign.IntotoSubjectClaimVerifier
@@ -137,7 +141,7 @@ func (c *VerifyAttestationCommand) Exec(ctx context.Context, images []string) (e
 		co.TSAIntermediateCertificates = intermediates
 		co.TSARootCertificates = roots
 	}
-	if !c.SkipTlogVerify {
+	if !c.IgnoreTlog {
 		if c.RekorURL != "" {
 			rekorClient, err := rekor.NewClient(c.RekorURL)
 			if err != nil {
@@ -269,18 +273,23 @@ func (c *VerifyAttestationCommand) Exec(ctx context.Context, images []string) (e
 
 		var checked []oci.Signature
 		var validationErrors []error
+		// To aid in determining if there's a mismatch in what predicateType
+		// we're looking for and what we checked, keep track of them here so
+		// that we can help the user figure out if there's a typo, etc.
+		checkedPredicateTypes := []string{}
 		for _, vp := range verified {
-			payload, err := policy.AttestationToPayloadJSON(ctx, c.PredicateType, vp)
+			payload, gotPredicateType, err := policy.AttestationToPayloadJSON(ctx, c.PredicateType, vp)
 			if err != nil {
 				return fmt.Errorf("converting to consumable policy validation: %w", err)
 			}
+			checkedPredicateTypes = append(checkedPredicateTypes, gotPredicateType)
 			if len(payload) == 0 {
 				// This is not the predicate type we're looking for.
 				continue
 			}
 
 			if len(cuePolicies) > 0 {
-				fmt.Fprintf(os.Stderr, "will be validating against CUE policies: %v\n", cuePolicies)
+				ui.Infof(ctx, "will be validating against CUE policies: %v", cuePolicies)
 				cueValidationErr := cue.ValidateJSON(payload, cuePolicies)
 				if cueValidationErr != nil {
 					validationErrors = append(validationErrors, cueValidationErr)
@@ -289,7 +298,7 @@ func (c *VerifyAttestationCommand) Exec(ctx context.Context, images []string) (e
 			}
 
 			if len(regoPolicies) > 0 {
-				fmt.Fprintf(os.Stderr, "will be validating against Rego policies: %v\n", regoPolicies)
+				ui.Infof(ctx, "will be validating against Rego policies: %v", regoPolicies)
 				regoValidationErrs := rego.ValidateJSON(payload, regoPolicies)
 				if len(regoValidationErrs) > 0 {
 					validationErrors = append(validationErrors, regoValidationErrs...)
@@ -301,21 +310,21 @@ func (c *VerifyAttestationCommand) Exec(ctx context.Context, images []string) (e
 		}
 
 		if len(validationErrors) > 0 {
-			fmt.Fprintf(os.Stderr, "There are %d number of errors occurred during the validation:\n", len(validationErrors))
+			ui.Infof(ctx, "There are %d number of errors occurred during the validation:\n", len(validationErrors))
 			for _, v := range validationErrors {
-				_, _ = fmt.Fprintf(os.Stderr, "- %v\n", v)
+				ui.Infof(ctx, "- %v", v)
 			}
 			return fmt.Errorf("%d validation errors occurred", len(validationErrors))
 		}
 
 		if len(checked) == 0 {
-			return fmt.Errorf("none of the attestations matched the predicate type: %s", c.PredicateType)
+			return fmt.Errorf("none of the attestations matched the predicate type: %s, found: %s", c.PredicateType, strings.Join(checkedPredicateTypes, ","))
 		}
 
 		// TODO: add CUE validation report to `PrintVerificationHeader`.
-		PrintVerificationHeader(imageRef, co, bundleVerified, fulcioVerified)
+		PrintVerificationHeader(ctx, imageRef, co, bundleVerified, fulcioVerified)
 		// The attestations are always JSON, so use the raw "text" mode for outputting them instead of conversion
-		PrintVerification(imageRef, checked, "text")
+		PrintVerification(ctx, checked, "text")
 	}
 
 	return nil

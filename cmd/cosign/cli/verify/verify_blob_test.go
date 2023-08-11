@@ -48,6 +48,7 @@ import (
 	"github.com/sigstore/rekor/pkg/generated/models"
 	"github.com/sigstore/rekor/pkg/pki"
 	"github.com/sigstore/rekor/pkg/types"
+	rekor_dsse "github.com/sigstore/rekor/pkg/types/dsse"
 	"github.com/sigstore/rekor/pkg/types/hashedrekord"
 	hashedrekord_v001 "github.com/sigstore/rekor/pkg/types/hashedrekord/v0.0.1"
 	"github.com/sigstore/rekor/pkg/types/intoto"
@@ -56,7 +57,6 @@ import (
 	"github.com/sigstore/sigstore/pkg/signature"
 	"github.com/sigstore/sigstore/pkg/signature/dsse"
 	signatureoptions "github.com/sigstore/sigstore/pkg/signature/options"
-	"github.com/sigstore/timestamp-authority/pkg/generated/client/timestamp"
 )
 
 func TestSignaturesRef(t *testing.T) {
@@ -195,38 +195,36 @@ func TestVerifyBlob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tsChain, err := tsaClient.Timestamp.GetTimestampCertChain(nil)
+	certChainPEM, err := cryptoutils.MarshalCertificatesToPEM(tsaClient.CertChain)
 	if err != nil {
-		t.Fatalf("unexpected error getting timestamp chain: %v", err)
+		t.Fatalf("unexpected error marshalling cert chain: %v", err)
 	}
 	expiredTSACertChainPath := filepath.Join(td, "exptsacertchain.pem")
-	if err := os.WriteFile(expiredTSACertChainPath, []byte(tsChain.Payload), 0644); err != nil {
+	if err := os.WriteFile(expiredTSACertChainPath, certChainPEM, 0644); err != nil {
 		t.Fatal(err)
 	}
-	var tsRespBytes bytes.Buffer
-	_, err = tsaClient.Timestamp.GetTimestampResponse(&timestamp.GetTimestampResponseParams{}, &tsRespBytes)
+	tsr, err := tsaClient.GetTimestampResponse(nil)
 	if err != nil {
 		t.Fatalf("unable to generate a timestamp response: %v", err)
 	}
-	rfc3161Timestamp := &bundle.RFC3161Timestamp{SignedRFC3161Timestamp: tsRespBytes.Bytes()}
+	rfc3161Timestamp := &bundle.RFC3161Timestamp{SignedRFC3161Timestamp: tsr}
 	expiredTSPath := writeTimestampFile(t, td, rfc3161Timestamp, "expiredrfc3161TS.json")
 	tsaClient, err = mock.NewTSAClient(unexpiredTSAOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tsRespBytes.Reset()
-	_, err = tsaClient.Timestamp.GetTimestampResponse(&timestamp.GetTimestampResponseParams{}, &tsRespBytes)
+	tsr, err = tsaClient.GetTimestampResponse(nil)
 	if err != nil {
 		t.Fatalf("unable to generate a timestamp response: %v", err)
 	}
-	rfc3161Timestamp = &bundle.RFC3161Timestamp{SignedRFC3161Timestamp: tsRespBytes.Bytes()}
+	rfc3161Timestamp = &bundle.RFC3161Timestamp{SignedRFC3161Timestamp: tsr}
 	unexpiredTSPath := writeTimestampFile(t, td, rfc3161Timestamp, "unexpiredrfc3161TS.json")
-	tsChain, err = tsaClient.Timestamp.GetTimestampCertChain(nil)
+	certChainPEM, err = cryptoutils.MarshalCertificatesToPEM(tsaClient.CertChain)
 	if err != nil {
-		t.Fatalf("unexpected error getting timestamp chain: %v", err)
+		t.Fatalf("unexpected error marshalling cert chain: %v", err)
 	}
 	unexpiredTSACertChainPath := filepath.Join(td, "unexptsacertchain.pem")
-	if err := os.WriteFile(unexpiredTSACertChainPath, []byte(tsChain.Payload), 0644); err != nil {
+	if err := os.WriteFile(unexpiredTSACertChainPath, certChainPEM, 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -573,9 +571,9 @@ func TestVerifyBlob(t *testing.T) {
 					CertIdentity:   identity,
 					CertOidcIssuer: issuer,
 				},
-				IgnoreSCT:      true,
-				CertChain:      chainPath,
-				SkipTlogVerify: tt.skipTlogVerify,
+				IgnoreSCT:  true,
+				CertChain:  chainPath,
+				IgnoreTlog: tt.skipTlogVerify,
 			}
 			blobPath := writeBlobFile(t, td, string(blobBytes), "blob.txt")
 			if tt.signature != "" {
@@ -864,7 +862,44 @@ func TestVerifyBlobCmdWithBundle(t *testing.T) {
 			t.Fatal("expected error due to expired cert, received nil")
 		}
 	})
-	t.Run("Attestation", func(t *testing.T) {
+	t.Run("dsse Attestation", func(t *testing.T) {
+		identity := "hello@foo.com"
+		issuer := "issuer"
+		leafCert, _, leafPemCert, signer := keyless.genLeafCert(t, identity, issuer)
+
+		stmt := `{"_type":"https://in-toto.io/Statement/v0.1","predicateType":"customFoo","subject":[{"name":"subject","digest":{"sha256":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}}],"predicate":{}}`
+		wrapped := dsse.WrapSigner(signer, ctypes.IntotoPayloadType)
+		signedPayload, err := wrapped.SignMessage(bytes.NewReader([]byte(stmt)), signatureoptions.WithContext(context.Background()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// intoto sig = json-serialized dsse envelope
+		sig := signedPayload
+
+		// Create bundle
+		entry := genRekorEntry(t, rekor_dsse.KIND, "0.0.1", signedPayload, leafPemCert, sig)
+		b := createBundle(t, sig, leafPemCert, keyless.rekorLogID, leafCert.NotBefore.Unix()+1, entry)
+		b.Bundle.SignedEntryTimestamp = keyless.rekorSignPayload(t, b.Bundle.Payload)
+		bundlePath := writeBundleFile(t, keyless.td, b, "bundle.json")
+		blobPath := writeBlobFile(t, keyless.td, string(signedPayload), "attestation.txt")
+
+		// Verify command
+		cmd := VerifyBlobAttestationCommand{
+			CertVerifyOptions: options.CertVerifyOptions{
+				CertIdentity:   identity,
+				CertOidcIssuer: issuer,
+			},
+			CertRef:       "", // Cert is fetched from bundle
+			CertChain:     "", // Chain is fetched from TUF/SIGSTORE_ROOT_FILE
+			SignaturePath: "", // Sig is fetched from bundle
+			KeyOpts:       options.KeyOpts{BundlePath: bundlePath},
+			IgnoreSCT:     true,
+		}
+		if err := cmd.Exec(context.Background(), blobPath); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("intoto Attestation", func(t *testing.T) {
 		identity := "hello@foo.com"
 		issuer := "issuer"
 		leafCert, _, leafPemCert, signer := keyless.genLeafCert(t, identity, issuer)
@@ -1073,20 +1108,19 @@ func TestVerifyBlobCmdWithBundle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		tsChain, err := tsaClient.Timestamp.GetTimestampCertChain(nil)
+		certChainPEM, err := cryptoutils.MarshalCertificatesToPEM(tsaClient.CertChain)
 		if err != nil {
-			t.Fatalf("unexpected error getting timestamp chain: %v", err)
+			t.Fatalf("unexpected error marshalling cert chain: %v", err)
 		}
 		tsaCertChainPath := filepath.Join(keyless.td, "tsacertchain.pem")
-		if err := os.WriteFile(tsaCertChainPath, []byte(tsChain.Payload), 0644); err != nil {
+		if err := os.WriteFile(tsaCertChainPath, certChainPEM, 0644); err != nil {
 			t.Fatal(err)
 		}
-		var tsRespBytes bytes.Buffer
-		_, err = tsaClient.Timestamp.GetTimestampResponse(&timestamp.GetTimestampResponseParams{}, &tsRespBytes)
+		tsr, err := tsaClient.GetTimestampResponse(nil)
 		if err != nil {
 			t.Fatalf("unable to generate a timestamp response: %v", err)
 		}
-		rfc3161Timestamp := &bundle.RFC3161Timestamp{SignedRFC3161Timestamp: tsRespBytes.Bytes()}
+		rfc3161Timestamp := &bundle.RFC3161Timestamp{SignedRFC3161Timestamp: tsr}
 		tsPath := writeTimestampFile(t, keyless.td, rfc3161Timestamp, "rfc3161TS.json")
 
 		entry := genRekorEntry(t, hashedrekord.KIND, hashedrekord.New().DefaultVersion(), []byte(blob), leafPemCert, sig)
@@ -1196,7 +1230,7 @@ func TestVerifyBlobCmdWithBundle(t *testing.T) {
 			t.Fatalf("expected error with mismatched root, got %v", err)
 		}
 	})
-	t.Run("Attestation with keyless", func(t *testing.T) {
+	t.Run("intoto Attestation with keyless", func(t *testing.T) {
 		identity := "hello@foo.com"
 		issuer := "issuer"
 		leafCert, _, leafPemCert, signer := keyless.genLeafCert(t, identity, issuer)
@@ -1480,6 +1514,8 @@ func createEntry(ctx context.Context, kind, apiVersion string, blobBytes, certBy
 		props.ArtifactHash = strings.ToLower(hex.EncodeToString(blobHash[:]))
 		props.SignatureBytes = sigBytes
 	case intoto.KIND:
+		props.ArtifactBytes = blobBytes
+	case rekor_dsse.KIND:
 		props.ArtifactBytes = blobBytes
 	default:
 		return nil, fmt.Errorf("unexpected entry kind: %s", kind)

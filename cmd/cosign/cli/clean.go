@@ -52,7 +52,7 @@ func Clean() *cobra.Command {
 
 func CleanCmd(ctx context.Context, regOpts options.RegistryOptions, cleanType options.CleanType, imageRef string, force bool) error {
 	if !force {
-		ui.Warn(ctx, prompt(cleanType))
+		ui.Warnf(ctx, prompt(cleanType))
 		if err := ui.ConfirmContinue(ctx); err != nil {
 			return err
 		}
@@ -96,7 +96,7 @@ func CleanCmd(ctx context.Context, regOpts options.RegistryOptions, cleanType op
 	for _, t := range cleanTags {
 		if err := remote.Delete(t, remoteOpts...); err != nil {
 			var te *transport.Error
-			if errors.As(err, &te) && te.StatusCode == http.StatusNotFound {
+			if errors.As(err, &te) && te.StatusCode == http.StatusNotFound { //nolint: revive
 				// If the tag doesn't exist, some registries may
 				// respond with a 404, which shouldn't be considered an
 				// error.
@@ -114,13 +114,13 @@ func CleanCmd(ctx context.Context, regOpts options.RegistryOptions, cleanType op
 func prompt(cleanType options.CleanType) string {
 	switch cleanType {
 	case options.CleanTypeSignature:
-		return "WARNING: this will remove all signatures from the image"
+		return "this will remove all signatures from the image"
 	case options.CleanTypeSbom:
-		return "WARNING: this will remove all SBOMs from the image"
+		return "this will remove all SBOMs from the image"
 	case options.CleanTypeAttestation:
-		return "WARNING: this will remove all attestations from the image"
+		return "this will remove all attestations from the image"
 	case options.CleanTypeAll:
-		return "WARNING: this will remove all signatures, SBOMs and attestations from the image"
+		return "this will remove all signatures, SBOMs and attestations from the image"
 	}
 	panic("invalid CleanType value")
 }

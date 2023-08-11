@@ -18,15 +18,16 @@ package fulcioverifier
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/fulcio"
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v2/internal/ui"
 	"github.com/sigstore/cosign/v2/pkg/cosign"
+	"github.com/sigstore/sigstore/pkg/signature"
 )
 
-func NewSigner(ctx context.Context, ko options.KeyOpts) (*fulcio.Signer, error) {
-	fs, err := fulcio.NewSigner(ctx, ko)
+func NewSigner(ctx context.Context, ko options.KeyOpts, signer signature.SignerVerifier) (*fulcio.Signer, error) {
+	fs, err := fulcio.NewSigner(ctx, ko, signer)
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +42,7 @@ func NewSigner(ctx context.Context, ko options.KeyOpts) (*fulcio.Signer, error) 
 	if err := cosign.VerifySCT(ctx, fs.Cert, fs.Chain, fs.SCT, pubKeys); err != nil {
 		return nil, fmt.Errorf("verifying SCT: %w", err)
 	}
-	fmt.Fprintln(os.Stderr, "Successfully verified SCT...")
+	ui.Infof(ctx, "Successfully verified SCT...")
 
 	return fs, nil
 }

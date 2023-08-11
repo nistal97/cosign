@@ -22,10 +22,13 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
-	"io"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -55,16 +58,15 @@ import (
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/publickey"
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/sign"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/upload"
 	cliverify "github.com/sigstore/cosign/v2/cmd/cosign/cli/verify"
+	"github.com/sigstore/cosign/v2/internal/pkg/cosign/tsa"
+	"github.com/sigstore/cosign/v2/internal/pkg/cosign/tsa/client"
 	"github.com/sigstore/cosign/v2/pkg/cosign"
 	"github.com/sigstore/cosign/v2/pkg/cosign/bundle"
 	"github.com/sigstore/cosign/v2/pkg/cosign/env"
 	"github.com/sigstore/cosign/v2/pkg/cosign/kubernetes"
-	cremote "github.com/sigstore/cosign/v2/pkg/cosign/remote"
 	"github.com/sigstore/cosign/v2/pkg/oci/mutate"
 	ociremote "github.com/sigstore/cosign/v2/pkg/oci/remote"
-	"github.com/sigstore/cosign/v2/pkg/sget"
 	sigs "github.com/sigstore/cosign/v2/pkg/signature"
 	"github.com/sigstore/sigstore/pkg/signature/payload"
 	tsaclient "github.com/sigstore/timestamp-authority/pkg/client"
@@ -75,6 +77,7 @@ import (
 const (
 	serverEnv = "REKOR_SERVER"
 	rekorURL  = "https://rekor.sigstore.dev"
+	fulcioURL = "https://fulcio.sigstore.dev"
 )
 
 var keyPass = []byte("hello")
@@ -85,13 +88,14 @@ var passFunc = func(_ bool) ([]byte, error) {
 
 var verify = func(keyRef, imageRef string, checkClaims bool, annotations map[string]interface{}, attachment string) error {
 	cmd := cliverify.VerifyCommand{
-		KeyRef:         keyRef,
-		RekorURL:       rekorURL,
-		CheckClaims:    checkClaims,
-		Annotations:    sigs.AnnotationsMap{Annotations: annotations},
-		Attachment:     attachment,
-		HashAlgorithm:  crypto.SHA256,
-		SkipTlogVerify: true,
+		KeyRef:        keyRef,
+		RekorURL:      rekorURL,
+		CheckClaims:   checkClaims,
+		Annotations:   sigs.AnnotationsMap{Annotations: annotations},
+		Attachment:    attachment,
+		HashAlgorithm: crypto.SHA256,
+		IgnoreTlog:    true,
+		MaxWorkers:    10,
 	}
 
 	args := []string{imageRef}
@@ -107,7 +111,26 @@ var verifyTSA = func(keyRef, imageRef string, checkClaims bool, annotations map[
 		Attachment:       attachment,
 		HashAlgorithm:    crypto.SHA256,
 		TSACertChainPath: tsaCertChain,
-		SkipTlogVerify:   skipTlogVerify,
+		IgnoreTlog:       skipTlogVerify,
+		MaxWorkers:       10,
+	}
+
+	args := []string{imageRef}
+
+	return cmd.Exec(context.Background(), args)
+}
+
+var verifyKeylessTSA = func(imageRef string, tsaCertChain string, skipSCT bool, skipTlogVerify bool) error {
+	cmd := cliverify.VerifyCommand{
+		CertVerifyOptions: options.CertVerifyOptions{
+			CertOidcIssuerRegexp: ".*",
+			CertIdentityRegexp:   ".*",
+		},
+		HashAlgorithm:    crypto.SHA256,
+		TSACertChainPath: tsaCertChain,
+		IgnoreSCT:        skipSCT,
+		IgnoreTlog:       skipTlogVerify,
+		MaxWorkers:       10,
 	}
 
 	args := []string{imageRef}
@@ -118,13 +141,14 @@ var verifyTSA = func(keyRef, imageRef string, checkClaims bool, annotations map[
 // Used to verify local images stored on disk
 var verifyLocal = func(keyRef, path string, checkClaims bool, annotations map[string]interface{}, attachment string) error {
 	cmd := cliverify.VerifyCommand{
-		KeyRef:         keyRef,
-		CheckClaims:    checkClaims,
-		Annotations:    sigs.AnnotationsMap{Annotations: annotations},
-		Attachment:     attachment,
-		HashAlgorithm:  crypto.SHA256,
-		LocalImage:     true,
-		SkipTlogVerify: true,
+		KeyRef:        keyRef,
+		CheckClaims:   checkClaims,
+		Annotations:   sigs.AnnotationsMap{Annotations: annotations},
+		Attachment:    attachment,
+		HashAlgorithm: crypto.SHA256,
+		LocalImage:    true,
+		IgnoreTlog:    true,
+		MaxWorkers:    10,
 	}
 
 	args := []string{path}
@@ -259,8 +283,8 @@ func TestAttestVerifySPDXJSON(t *testing.T) {
 	attestVerify(t,
 		"spdxjson",
 		string(attestationBytes),
-		`predicate: Data: spdxVersion: "SPDX-2.2"`,
-		`predicate: Data: spdxVersion: "SPDX-9.9"`,
+		`predicate: spdxVersion: "SPDX-2.2"`,
+		`predicate: spdxVersion: "SPDX-9.9"`,
 	)
 }
 
@@ -272,8 +296,8 @@ func TestAttestVerifyCycloneDXJSON(t *testing.T) {
 	attestVerify(t,
 		"cyclonedx",
 		string(attestationBytes),
-		`predicate: Data: specVersion: "1.4"`,
-		`predicate: Data: specVersion: "7.7"`,
+		`predicate: specVersion: "1.4"`,
+		`predicate: specVersion: "7.7"`,
 	)
 }
 
@@ -314,8 +338,9 @@ func attestVerify(t *testing.T, predicateType, attestation, goodCue, badCue stri
 
 	// Verify should fail at first
 	verifyAttestation := cliverify.VerifyAttestationCommand{
-		KeyRef:         pubKeyPath,
-		SkipTlogVerify: true,
+		KeyRef:     pubKeyPath,
+		IgnoreTlog: true,
+		MaxWorkers: 10,
 	}
 
 	// Fail case when using without type and policy flag
@@ -354,6 +379,233 @@ func attestVerify(t *testing.T, predicateType, attestation, goodCue, badCue stri
 
 	// Look for a specific annotation
 	mustErr(verify(pubKeyPath, imgName, true, map[string]interface{}{"foo": "bar"}, ""), t)
+}
+
+func TestAttestationDownload(t *testing.T) {
+	repo, stop := reg(t)
+	defer stop()
+	td := t.TempDir()
+
+	imgName := path.Join(repo, "cosign-attest-download-e2e")
+
+	_, _, cleanup := mkimage(t, imgName)
+	defer cleanup()
+
+	_, privKeyPath, _ := keypair(t, td)
+	ko := options.KeyOpts{KeyRef: privKeyPath, PassFunc: passFunc}
+
+	ctx := context.Background()
+
+	slsaAttestation := `{ "buildType": "x", "builder": { "id": "2" }, "recipe": {} }`
+	slsaAttestationPath := filepath.Join(td, "attestation.slsa.json")
+	if err := os.WriteFile(slsaAttestationPath, []byte(slsaAttestation), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	vulnAttestation := `
+	{
+    "invocation": {
+      "parameters": null,
+      "uri": "invocation.example.com/cosign-testing",
+      "event_id": "",
+      "builder.id": ""
+    },
+    "scanner": {
+      "uri": "fakescanner.example.com/cosign-testing",
+      "version": "",
+      "db": {
+        "uri": "",
+        "version": ""
+      },
+      "result": null
+    },
+    "metadata": {
+      "scanStartedOn": "2022-04-12T00:00:00Z",
+      "scanFinishedOn": "2022-04-12T00:10:00Z"
+    }
+}
+`
+	vulnAttestationPath := filepath.Join(td, "attestation.vuln.json")
+	if err := os.WriteFile(vulnAttestationPath, []byte(vulnAttestation), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	ref, err := name.ParseReference(imgName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regOpts := options.RegistryOptions{}
+	ociremoteOpts, err := regOpts.ClientOpts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Attest to create a slsa attestation
+	attestCommand := attest.AttestCommand{
+		KeyOpts:       ko,
+		PredicatePath: slsaAttestationPath,
+		PredicateType: "slsaprovenance",
+		Timeout:       30 * time.Second,
+		Replace:       true,
+	}
+	must(attestCommand.Exec(ctx, imgName), t)
+
+	// Attest to create a vuln attestation
+	attestCommand = attest.AttestCommand{
+		KeyOpts:       ko,
+		PredicatePath: vulnAttestationPath,
+		PredicateType: "vuln",
+		Timeout:       30 * time.Second,
+		Replace:       true,
+	}
+	must(attestCommand.Exec(ctx, imgName), t)
+
+	// Call download.AttestationCmd() to ensure success
+	attOpts := options.AttestationDownloadOptions{}
+	must(download.AttestationCmd(ctx, regOpts, attOpts, imgName), t)
+
+	attestations, err := cosign.FetchAttestationsForReference(ctx, ref, attOpts.PredicateType, ociremoteOpts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attestations) != 2 {
+		t.Fatal(fmt.Errorf("expected len(attestations) == 2, got %d", len(attestations)))
+	}
+}
+
+func TestAttestationDownloadWithPredicateType(t *testing.T) {
+	repo, stop := reg(t)
+	defer stop()
+	td := t.TempDir()
+
+	imgName := path.Join(repo, "cosign-attest-download-predicate-type-e2e")
+
+	_, _, cleanup := mkimage(t, imgName)
+	defer cleanup()
+
+	_, privKeyPath, _ := keypair(t, td)
+	ko := options.KeyOpts{KeyRef: privKeyPath, PassFunc: passFunc}
+
+	ctx := context.Background()
+
+	slsaAttestation := `{ "buildType": "x", "builder": { "id": "2" }, "recipe": {} }`
+	slsaAttestationPath := filepath.Join(td, "attestation.slsa.json")
+	if err := os.WriteFile(slsaAttestationPath, []byte(slsaAttestation), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	vulnAttestation := `
+	{
+    "invocation": {
+      "parameters": null,
+      "uri": "invocation.example.com/cosign-testing",
+      "event_id": "",
+      "builder.id": ""
+    },
+    "scanner": {
+      "uri": "fakescanner.example.com/cosign-testing",
+      "version": "",
+      "db": {
+        "uri": "",
+        "version": ""
+      },
+      "result": null
+    },
+    "metadata": {
+      "scanStartedOn": "2022-04-12T00:00:00Z",
+      "scanFinishedOn": "2022-04-12T00:10:00Z"
+    }
+}
+`
+	vulnAttestationPath := filepath.Join(td, "attestation.vuln.json")
+	if err := os.WriteFile(vulnAttestationPath, []byte(vulnAttestation), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	ref, err := name.ParseReference(imgName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regOpts := options.RegistryOptions{}
+	ociremoteOpts, err := regOpts.ClientOpts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Attest to create a slsa attestation
+	attestCommand := attest.AttestCommand{
+		KeyOpts:       ko,
+		PredicatePath: slsaAttestationPath,
+		PredicateType: "slsaprovenance",
+		Timeout:       30 * time.Second,
+		Replace:       true,
+	}
+	must(attestCommand.Exec(ctx, imgName), t)
+
+	// Attest to create a vuln attestation
+	attestCommand = attest.AttestCommand{
+		KeyOpts:       ko,
+		PredicatePath: vulnAttestationPath,
+		PredicateType: "vuln",
+		Timeout:       30 * time.Second,
+		Replace:       true,
+	}
+	must(attestCommand.Exec(ctx, imgName), t)
+
+	// Call download.AttestationCmd() to ensure success with --predicate-type
+	attOpts := options.AttestationDownloadOptions{
+		PredicateType: "vuln",
+	}
+	must(download.AttestationCmd(ctx, regOpts, attOpts, imgName), t)
+
+	predicateType, _ := options.ParsePredicateType(attOpts.PredicateType)
+	attestations, err := cosign.FetchAttestationsForReference(ctx, ref, predicateType, ociremoteOpts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attestations) != 1 {
+		t.Fatal(fmt.Errorf("expected len(attestations) == 1, got %d", len(attestations)))
+	}
+}
+
+func TestAttestationDownloadWithBadPredicateType(t *testing.T) {
+	repo, stop := reg(t)
+	defer stop()
+	td := t.TempDir()
+
+	imgName := path.Join(repo, "cosign-attest-download-bad-type-e2e")
+
+	_, _, cleanup := mkimage(t, imgName)
+	defer cleanup()
+
+	_, privKeyPath, _ := keypair(t, td)
+	ko := options.KeyOpts{KeyRef: privKeyPath, PassFunc: passFunc}
+
+	ctx := context.Background()
+
+	slsaAttestation := `{ "buildType": "x", "builder": { "id": "2" }, "recipe": {} }`
+	slsaAttestationPath := filepath.Join(td, "attestation.slsa.json")
+	if err := os.WriteFile(slsaAttestationPath, []byte(slsaAttestation), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	regOpts := options.RegistryOptions{}
+
+	// Attest to create a slsa attestation
+	attestCommand := attest.AttestCommand{
+		KeyOpts:       ko,
+		PredicatePath: slsaAttestationPath,
+		PredicateType: "slsaprovenance",
+		Timeout:       30 * time.Second,
+		Replace:       true,
+	}
+	must(attestCommand.Exec(ctx, imgName), t)
+
+	// Call download.AttestationCmd() to ensure failure with non-existant --predicate-type
+	attOpts := options.AttestationDownloadOptions{
+		PredicateType: "vuln",
+	}
+	mustErr(download.AttestationCmd(ctx, regOpts, attOpts, imgName), t)
 }
 
 func TestAttestationReplaceCreate(t *testing.T) {
@@ -398,7 +650,8 @@ func TestAttestationReplaceCreate(t *testing.T) {
 	must(attestCommand.Exec(ctx, imgName), t)
 
 	// Download and count the attestations
-	attestations, err := cosign.FetchAttestationsForReference(ctx, ref, ociremoteOpts...)
+	attOpts := options.AttestationDownloadOptions{}
+	attestations, err := cosign.FetchAttestationsForReference(ctx, ref, attOpts.PredicateType, ociremoteOpts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +701,8 @@ func TestAttestationReplace(t *testing.T) {
 	must(attestCommand.Exec(ctx, imgName), t)
 
 	// Download and count the attestations
-	attestations, err := cosign.FetchAttestationsForReference(ctx, ref, ociremoteOpts...)
+	attOpts := options.AttestationDownloadOptions{}
+	attestations, err := cosign.FetchAttestationsForReference(ctx, ref, attOpts.PredicateType, ociremoteOpts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,7 +719,7 @@ func TestAttestationReplace(t *testing.T) {
 		Timeout:       30 * time.Second,
 	}
 	must(attestCommand.Exec(ctx, imgName), t)
-	attestations, err = cosign.FetchAttestationsForReference(ctx, ref, ociremoteOpts...)
+	attestations, err = cosign.FetchAttestationsForReference(ctx, ref, attOpts.PredicateType, ociremoteOpts...)
 
 	// Download and count the attestations
 	if err != nil {
@@ -486,7 +740,7 @@ func TestAttestationReplace(t *testing.T) {
 	must(attestCommand.Exec(ctx, imgName), t)
 
 	// Download and count the attestations
-	attestations, err = cosign.FetchAttestationsForReference(ctx, ref, ociremoteOpts...)
+	attestations, err = cosign.FetchAttestationsForReference(ctx, ref, attOpts.PredicateType, ociremoteOpts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,13 +792,14 @@ func TestAttestationRFC3161Timestamp(t *testing.T) {
 		PredicatePath: slsaAttestationPath,
 		PredicateType: "slsaprovenance",
 		Timeout:       30 * time.Second,
-		TSAServerURL:  server.URL,
+		TSAServerURL:  server.URL + "/api/v1/timestamp",
 		TlogUpload:    false,
 	}
 	must(attestCommand.Exec(ctx, imgName), t)
 
 	// Download and count the attestations
-	attestations, err := cosign.FetchAttestationsForReference(ctx, ref, ociremoteOpts...)
+	attOpts := options.AttestationDownloadOptions{}
+	attestations, err := cosign.FetchAttestationsForReference(ctx, ref, attOpts.PredicateType, ociremoteOpts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,11 +830,90 @@ func TestAttestationRFC3161Timestamp(t *testing.T) {
 	verifyAttestation := cliverify.VerifyAttestationCommand{
 		KeyRef:           pubKeyPath,
 		TSACertChainPath: file.Name(),
-		SkipTlogVerify:   true,
+		IgnoreTlog:       true,
 		PredicateType:    "slsaprovenance",
+		MaxWorkers:       10,
 	}
 
 	must(verifyAttestation.Exec(ctx, []string{imgName}), t)
+}
+
+func TestAttachWithRFC3161Timestamp(t *testing.T) {
+	ctx := context.Background()
+	// TSA server needed to create timestamp
+	viper.Set("timestamp-signer", "memory")
+	apiServer := server.NewRestAPIServer("localhost", 0, []string{"http"}, 10*time.Second, 10*time.Second)
+	server := httptest.NewServer(apiServer.GetHandler())
+	t.Cleanup(server.Close)
+
+	repo, stop := reg(t)
+	defer stop()
+	td := t.TempDir()
+
+	imgName := path.Join(repo, "cosign-attach-timestamp-e2e")
+
+	_, _, cleanup := mkimage(t, imgName)
+	defer cleanup()
+
+	b := bytes.Buffer{}
+	must(generate.GenerateCmd(context.Background(), options.RegistryOptions{}, imgName, nil, &b), t)
+
+	rootCert, rootKey, _ := GenerateRootCa()
+	subCert, subKey, _ := GenerateSubordinateCa(rootCert, rootKey)
+	leafCert, privKey, _ := GenerateLeafCert("subject@mail.com", "oidc-issuer", subCert, subKey)
+	pemRoot := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootCert.Raw})
+	pemSub := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: subCert.Raw})
+	pemLeaf := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafCert.Raw})
+
+	rootPool := x509.NewCertPool()
+	rootPool.AddCert(rootCert)
+
+	payloadref := mkfile(b.String(), td, t)
+
+	h := sha256.Sum256(b.Bytes())
+	signature, _ := privKey.Sign(rand.Reader, h[:], crypto.SHA256)
+	b64signature := base64.StdEncoding.EncodeToString([]byte(signature))
+	sigRef := mkfile(b64signature, td, t)
+	pemleafRef := mkfile(string(pemLeaf), td, t)
+	pemrootRef := mkfile(string(pemRoot), td, t)
+
+	certchainRef := mkfile(string(append(pemSub[:], pemRoot[:]...)), td, t)
+
+	t.Setenv("SIGSTORE_ROOT_FILE", pemrootRef)
+
+	tsclient, err := tsaclient.GetTimestampClient(server.URL)
+	if err != nil {
+		t.Error(err)
+	}
+
+	chain, err := tsclient.Timestamp.GetTimestampCertChain(nil)
+	if err != nil {
+		t.Fatalf("unexpected error getting timestamp chain: %v", err)
+	}
+
+	file, err := os.CreateTemp(os.TempDir(), "tempfile")
+	if err != nil {
+		t.Fatalf("error creating temp file: %v", err)
+	}
+	defer os.Remove(file.Name())
+	_, err = file.WriteString(chain.Payload)
+	if err != nil {
+		t.Fatalf("error writing chain payload to temp file: %v", err)
+	}
+
+	tsBytes, err := tsa.GetTimestampedSignature(signature, client.NewTSAClient(server.URL+"/api/v1/timestamp"))
+	if err != nil {
+		t.Fatalf("unexpected error creating timestamp: %v", err)
+	}
+	rfc3161TSRef := mkfile(string(tsBytes), td, t)
+
+	// Upload it!
+	err = attach.SignatureCmd(ctx, options.RegistryOptions{}, sigRef, payloadref, pemleafRef, certchainRef, rfc3161TSRef, imgName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	must(verifyKeylessTSA(imgName, file.Name(), true, true), t)
 }
 
 func TestRekorBundle(t *testing.T) {
@@ -604,6 +938,40 @@ func TestRekorBundle(t *testing.T) {
 	}
 	so := options.SignOptions{
 		Upload: true,
+	}
+
+	// Sign the image
+	must(sign.SignCmd(ro, ko, so, []string{imgName}), t)
+	// Make sure verify works
+	must(verify(pubKeyPath, imgName, true, nil, ""), t)
+
+	// Make sure offline verification works with bundling
+	// use rekor prod since we have hardcoded the public key
+	os.Setenv(serverEnv, "notreal")
+	must(verify(pubKeyPath, imgName, true, nil, ""), t)
+}
+
+func TestFulcioBundle(t *testing.T) {
+	repo, stop := reg(t)
+	defer stop()
+	td := t.TempDir()
+
+	imgName := path.Join(repo, "cosign-e2e")
+
+	_, _, cleanup := mkimage(t, imgName)
+	defer cleanup()
+
+	_, privKeyPath, pubKeyPath := keypair(t, td)
+
+	ko := options.KeyOpts{
+		KeyRef:    privKeyPath,
+		PassFunc:  passFunc,
+		RekorURL:  rekorURL,
+		FulcioURL: fulcioURL,
+	}
+	so := options.SignOptions{
+		Upload:           true,
+		IssueCertificate: true,
 	}
 
 	// Sign the image
@@ -658,7 +1026,7 @@ func TestRFC3161Timestamp(t *testing.T) {
 	ko := options.KeyOpts{
 		KeyRef:       privKeyPath,
 		PassFunc:     passFunc,
-		TSAServerURL: server.URL,
+		TSAServerURL: server.URL + "/api/v1/timestamp",
 	}
 	so := options.SignOptions{
 		Upload:     true,
@@ -712,7 +1080,7 @@ func TestRekorBundleAndRFC3161Timestamp(t *testing.T) {
 	ko := options.KeyOpts{
 		KeyRef:           privKeyPath,
 		PassFunc:         passFunc,
-		TSAServerURL:     server.URL,
+		TSAServerURL:     server.URL + "/api/v1/timestamp",
 		RekorURL:         rekorURL,
 		SkipConfirmation: true,
 	}
@@ -897,14 +1265,14 @@ func TestSignBlob(t *testing.T) {
 	}
 	// Verify should fail on a bad input
 	cmd1 := cliverify.VerifyBlobCmd{
-		KeyOpts:        ko1,
-		SigRef:         "badsig",
-		SkipTlogVerify: true,
+		KeyOpts:    ko1,
+		SigRef:     "badsig",
+		IgnoreTlog: true,
 	}
 	cmd2 := cliverify.VerifyBlobCmd{
-		KeyOpts:        ko2,
-		SigRef:         "badsig",
-		SkipTlogVerify: true,
+		KeyOpts:    ko2,
+		SigRef:     "badsig",
+		IgnoreTlog: true,
 	}
 	mustErr(cmd1.Exec(ctx, blob), t)
 	mustErr(cmd2.Exec(ctx, blob), t)
@@ -948,17 +1316,18 @@ func TestSignBlobBundle(t *testing.T) {
 	}
 	// Verify should fail on a bad input
 	verifyBlobCmd := cliverify.VerifyBlobCmd{
-		KeyOpts:        ko1,
-		SkipTlogVerify: true,
+		KeyOpts:    ko1,
+		IgnoreTlog: true,
 	}
 	mustErr(verifyBlobCmd.Exec(ctx, bp), t)
 
 	// Now sign the blob with one key
 	ko := options.KeyOpts{
-		KeyRef:     privKeyPath1,
-		PassFunc:   passFunc,
-		BundlePath: bundlePath,
-		RekorURL:   rekorURL,
+		KeyRef:           privKeyPath1,
+		PassFunc:         passFunc,
+		BundlePath:       bundlePath,
+		RekorURL:         rekorURL,
+		SkipConfirmation: true,
 	}
 	if _, err := sign.SignBlobCmd(ro, ko, bp, true, "", "", false); err != nil {
 		t.Fatal(err)
@@ -973,7 +1342,7 @@ func TestSignBlobBundle(t *testing.T) {
 
 	// Point to a fake rekor server to make sure offline verification of the tlog entry works
 	os.Setenv(serverEnv, "notreal")
-	verifyBlobCmd.SkipTlogVerify = false
+	verifyBlobCmd.IgnoreTlog = false
 	must(verifyBlobCmd.Exec(ctx, bp), t)
 }
 
@@ -1029,8 +1398,8 @@ func TestSignBlobRFC3161TimestampBundle(t *testing.T) {
 	}
 	// Verify should fail on a bad input
 	verifyBlobCmd := cliverify.VerifyBlobCmd{
-		KeyOpts:        ko1,
-		SkipTlogVerify: true,
+		KeyOpts:    ko1,
+		IgnoreTlog: true,
 	}
 	mustErr(verifyBlobCmd.Exec(ctx, bp), t)
 
@@ -1040,8 +1409,9 @@ func TestSignBlobRFC3161TimestampBundle(t *testing.T) {
 		PassFunc:             passFunc,
 		BundlePath:           bundlePath,
 		RFC3161TimestampPath: tsPath,
-		TSAServerURL:         server.URL,
+		TSAServerURL:         server.URL + "/api/v1/timestamp",
 		RekorURL:             rekorURL,
+		SkipConfirmation:     true,
 	}
 	if _, err := sign.SignBlobCmd(ro, ko, bp, true, "", "", false); err != nil {
 		t.Fatal(err)
@@ -1054,7 +1424,7 @@ func TestSignBlobRFC3161TimestampBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Point to a fake rekor server to make sure offline verification of the tlog entry works
-	verifyBlobCmd.SkipTlogVerify = false
+	verifyBlobCmd.IgnoreTlog = false
 	must(verifyBlobCmd.Exec(ctx, bp), t)
 }
 
@@ -1187,6 +1557,11 @@ func TestUploadDownload(t *testing.T) {
 		signatureType attach.SignatureArgType
 		expectedErr   bool
 	}{
+		"stdin containing signature": {
+			signature:     "testsignatureraw",
+			signatureType: attach.StdinSignature,
+			expectedErr:   false,
+		},
 		"file containing signature": {
 			signature:     "testsignaturefile",
 			signatureType: attach.FileSignature,
@@ -1195,7 +1570,7 @@ func TestUploadDownload(t *testing.T) {
 		"raw signature as argument": {
 			signature:     "testsignatureraw",
 			signatureType: attach.RawSignature,
-			expectedErr:   false,
+			expectedErr:   true,
 		},
 		"empty signature as argument": {
 			signature:     "",
@@ -1211,21 +1586,25 @@ func TestUploadDownload(t *testing.T) {
 			payload := "testpayload"
 			payloadPath := mkfile(payload, td, t)
 			signature := base64.StdEncoding.EncodeToString([]byte(testCase.signature))
+			restoreStdin := func() {}
 
 			var sigRef string
 			if testCase.signatureType == attach.FileSignature {
 				sigRef = mkfile(signature, td, t)
+			} else if testCase.signatureType == attach.StdinSignature {
+				sigRef = "-"
+				restoreStdin = mockStdin(signature, td, t)
 			} else {
 				sigRef = signature
 			}
-
 			// Upload it!
-			err := attach.SignatureCmd(ctx, options.RegistryOptions{}, sigRef, payloadPath, imgName)
+			err := attach.SignatureCmd(ctx, options.RegistryOptions{}, sigRef, payloadPath, "", "", "", imgName)
 			if testCase.expectedErr {
 				mustErr(err, t)
 			} else {
 				must(err, t)
 			}
+			restoreStdin()
 
 			// Now download it!
 			se, err := ociremote.SignedEntity(ref, ociremote.WithRemoteOptions(registryClientOpts(ctx)...))
@@ -1260,55 +1639,6 @@ func TestUploadDownload(t *testing.T) {
 			// Now delete it!
 			cleanup()
 		})
-	}
-}
-
-func TestUploadBlob(t *testing.T) {
-	repo, stop := reg(t)
-	defer stop()
-	td := t.TempDir()
-	ctx := context.Background()
-
-	imgName := path.Join(repo, "/cosign-upload-e2e")
-	payload := "testpayload"
-	payloadPath := mkfile(payload, td, t)
-
-	// Upload it!
-	files := []cremote.File{cremote.FileFromFlag(payloadPath)}
-	must(upload.BlobCmd(ctx, options.RegistryOptions{}, files, nil, "", imgName), t)
-
-	// Check it
-	ref, err := name.ParseReference(imgName)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Now download it with sget (this should fail by tag)
-	if err := sget.New(imgName, "", "", os.Stdout).Do(ctx); err == nil {
-		t.Error("expected download to fail")
-	}
-
-	img, err := remote.Image(ref)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dgst, err := img.Digest()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	result := &bytes.Buffer{}
-
-	// But pass by digest
-	if err := sget.New(imgName+"@"+dgst.String(), "", "", result).Do(ctx); err != nil {
-		t.Fatal(err)
-	}
-	b, err := io.ReadAll(result)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(b) != payload {
-		t.Errorf("expected contents to be %s, got %s", payload, string(b))
 	}
 }
 
@@ -1412,8 +1742,9 @@ func TestSaveLoadAttestation(t *testing.T) {
 	// Use cue to verify attestation on the new image
 	policyPath := filepath.Join(td, "policy.cue")
 	verifyAttestation := cliverify.VerifyAttestationCommand{
-		KeyRef:         pubKeyPath,
-		SkipTlogVerify: true,
+		KeyRef:     pubKeyPath,
+		IgnoreTlog: true,
+		MaxWorkers: 10,
 	}
 	verifyAttestation.PredicateType = "slsaprovenance"
 	verifyAttestation.Policies = []string{policyPath}
@@ -1451,7 +1782,7 @@ func TestAttachSBOM(t *testing.T) {
 	out.Reset()
 
 	// Upload it!
-	must(attach.SBOMCmd(ctx, options.RegistryOptions{}, "./testdata/bom-go-mod.spdx", "spdx", imgName), t)
+	must(attach.SBOMCmd(ctx, options.RegistryOptions{}, options.RegistryExperimentalOptions{}, "./testdata/bom-go-mod.spdx", "spdx", imgName), t)
 
 	sboms, err := download.SBOMCmd(ctx, options.RegistryOptions{}, options.SBOMDownloadOptions{}, imgName, &out)
 	if err != nil {
@@ -1490,6 +1821,97 @@ func TestAttachSBOM(t *testing.T) {
 	// Now verify should work with that one, but not the other
 	must(verify(pubKeyPath1, imgName, true, nil, "sbom"), t)
 	mustErr(verify(pubKeyPath2, imgName, true, nil, "sbom"), t)
+}
+
+func TestAttachSBOM_bom_flag(t *testing.T) {
+	repo, stop := reg(t)
+	defer stop()
+	td := t.TempDir()
+	ctx := context.Background()
+	bomData, err := os.ReadFile("./testdata/bom-go-mod.spdx")
+	must(err, t)
+
+	testCases := map[string]struct {
+		bom         string
+		bomType     attach.SignatureArgType
+		expectedErr bool
+	}{
+		"stdin containing bom": {
+			bom:         string(bomData),
+			bomType:     attach.StdinSignature,
+			expectedErr: false,
+		},
+		"file containing bom": {
+			bom:         string(bomData),
+			bomType:     attach.FileSignature,
+			expectedErr: false,
+		},
+		"raw bom as argument": {
+			bom:         string(bomData),
+			bomType:     attach.RawSignature,
+			expectedErr: true,
+		},
+		"empty bom as argument": {
+			bom:         "",
+			bomType:     attach.RawSignature,
+			expectedErr: true,
+		},
+	}
+
+	for testName, testCase := range testCases {
+		t.Run(testName, func(t *testing.T) {
+			imgName := path.Join(repo, "sbom-image")
+			img, _, cleanup := mkimage(t, imgName)
+			var sbomRef string
+			restoreStdin := func() {}
+			if testCase.bomType == attach.FileSignature {
+				sbomRef = mkfile(testCase.bom, td, t)
+			} else if testCase.bomType == attach.StdinSignature {
+				sbomRef = "-"
+				restoreStdin = mockStdin(testCase.bom, td, t)
+			} else {
+				sbomRef = testCase.bom
+			}
+
+			out := bytes.Buffer{}
+			_, errPl := download.SBOMCmd(ctx, options.RegistryOptions{}, options.SBOMDownloadOptions{Platform: "darwin/amd64"}, img.Name(), &out)
+			if errPl == nil {
+				t.Fatalf("Expected error when passing Platform to single arch image")
+			}
+			_, err := download.SBOMCmd(ctx, options.RegistryOptions{}, options.SBOMDownloadOptions{}, img.Name(), &out)
+			if err == nil {
+				t.Fatal("Expected error")
+			}
+			t.Log(out.String())
+			out.Reset()
+
+			// Upload it!
+			err = attach.SBOMCmd(ctx, options.RegistryOptions{}, options.RegistryExperimentalOptions{}, sbomRef, "spdx", imgName)
+			restoreStdin()
+
+			if testCase.expectedErr {
+				mustErr(err, t)
+			} else {
+				sboms, err := download.SBOMCmd(ctx, options.RegistryOptions{}, options.SBOMDownloadOptions{}, imgName, &out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Log(out.String())
+				if len(sboms) != 1 {
+					t.Fatalf("Expected one sbom, got %d", len(sboms))
+				}
+				want, err := os.ReadFile("./testdata/bom-go-mod.spdx")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if diff := cmp.Diff(string(want), sboms[0]); diff != "" {
+					t.Errorf("diff: %s", diff)
+				}
+			}
+
+			cleanup()
+		})
+	}
 }
 
 func setenv(t *testing.T, k, v string) func() {
@@ -1601,6 +2023,19 @@ func TestGetPublicKeyCustomOut(t *testing.T) {
 	output, err := os.ReadFile(outPath)
 	must(err, t)
 	equals(keys.PublicBytes, output, t)
+}
+
+func mockStdin(contents, td string, t *testing.T) func() {
+	origin := os.Stdin
+
+	p := mkfile(contents, td, t)
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = f
+
+	return func() { os.Stdin = origin }
 }
 
 func mkfile(contents, td string, t *testing.T) string {
@@ -1715,7 +2150,7 @@ func registryClientOpts(ctx context.Context) []remote.Option {
 	}
 }
 
-// If a signature has a bundle, but *not for that signature*, cosign verification should fail
+// If a signature has a bundle, but *not for that signature*, cosign verification should fail.
 // This test is pretty long, so here are the basic points:
 //  1. Sign image1 with a keypair, store entry in rekor
 //  2. Sign image2 with keypair, DO NOT store entry in rekor
@@ -1814,6 +2249,7 @@ func TestInvalidBundle(t *testing.T) {
 		RekorURL:      rekorURL,
 		CheckClaims:   true,
 		HashAlgorithm: crypto.SHA256,
+		MaxWorkers:    10,
 	}
 	args := []string{img2}
 	mustErr(cmd.Exec(context.Background(), args), t)
@@ -1853,11 +2289,11 @@ func TestAttestBlobSignVerify(t *testing.T) {
 		KeyRef: pubKeyPath1,
 	}
 	blobVerifyAttestationCmd := cliverify.VerifyBlobAttestationCommand{
-		KeyOpts:        ko,
-		SignaturePath:  outputSignature,
-		PredicateType:  predicateType,
-		SkipTlogVerify: true,
-		CheckClaims:    true,
+		KeyOpts:       ko,
+		SignaturePath: outputSignature,
+		PredicateType: predicateType,
+		IgnoreTlog:    true,
+		CheckClaims:   true,
 	}
 	// Verify should fail on a bad input
 	mustErr(blobVerifyAttestationCmd.Exec(ctx, bp), t)
@@ -1915,6 +2351,7 @@ func TestOffline(t *testing.T) {
 		KeyRef:      pubKeyPath,
 		Offline:     true,
 		CheckClaims: true,
+		MaxWorkers:  10,
 	}
 	must(verifyCmd.Exec(ctx, []string{img1}), t)
 
